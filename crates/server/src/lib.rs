@@ -1,6 +1,7 @@
 pub mod error;
 pub mod mcp;
 pub mod middleware;
+pub mod release_notes;
 pub mod routes;
 
 // #[cfg(feature = "cloud")]

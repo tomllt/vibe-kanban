@@ -89,6 +89,10 @@ import {
   AbortConflictsRequest,
   Session,
   Workspace,
+  Sprint,
+  CreateSprintRequest,
+  UpdateSprintRequest,
+  ReleaseNotesResponse,
 } from 'shared/types';
 import type { WorkspaceWithSession } from '@/types/attempt';
 import { createWorkspaceWithSession } from '@/types/attempt';
@@ -382,6 +386,75 @@ export const projectsApi = {
       }
     );
     return handleApiResponse<ProjectRepo>(response);
+  },
+};
+
+export const sprintsApi = {
+  list: async (projectId: string): Promise<Sprint[]> => {
+    const response = await makeRequest(`/api/projects/${projectId}/sprints`);
+    return handleApiResponse<Sprint[]>(response);
+  },
+  create: async (
+    projectId: string,
+    data: CreateSprintRequest
+  ): Promise<Sprint> => {
+    const response = await makeRequest(`/api/projects/${projectId}/sprints`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<Sprint>(response);
+  },
+  update: async (
+    projectId: string,
+    sprintId: string,
+    data: UpdateSprintRequest
+  ): Promise<Sprint> => {
+    const response = await makeRequest(
+      `/api/projects/${projectId}/sprints/${sprintId}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<Sprint>(response);
+  },
+  delete: async (projectId: string, sprintId: string): Promise<void> => {
+    const response = await makeRequest(
+      `/api/projects/${projectId}/sprints/${sprintId}`,
+      { method: 'DELETE' }
+    );
+    await handleApiResponse<void>(response);
+  },
+  getReleaseNotes: async (
+    projectId: string,
+    sprintId: string
+  ): Promise<ReleaseNotesResponse> => {
+    const response = await makeRequest(
+      `/api/projects/${projectId}/sprints/${sprintId}/release-notes`
+    );
+    return handleApiResponse<ReleaseNotesResponse>(response);
+  },
+  downloadReleaseNotes: async (
+    projectId: string,
+    sprintId: string
+  ): Promise<Blob> => {
+    const response = await fetch(
+      `/api/projects/${projectId}/sprints/${sprintId}/release-notes?download=1`,
+      { headers: { Accept: 'text/markdown' } }
+    );
+
+    if (!response.ok) {
+      let errorMessage = `Request failed with status ${response.status}`;
+      try {
+        const errorData = await response.json();
+        if (errorData.message) errorMessage = errorData.message;
+      } catch {
+        errorMessage = response.statusText || errorMessage;
+      }
+      throw new ApiError(errorMessage, response.status, response);
+    }
+
+    return response.blob();
   },
 };
 

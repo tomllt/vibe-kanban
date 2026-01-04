@@ -22,6 +22,7 @@ pub mod repo;
 pub mod scratch;
 pub mod sessions;
 pub mod shared_tasks;
+pub mod sprints;
 pub mod tags;
 pub mod task_attempts;
 pub mod tasks;

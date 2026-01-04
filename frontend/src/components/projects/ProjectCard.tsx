@@ -15,6 +15,7 @@ import {
   Calendar,
   Edit,
   ExternalLink,
+  FileText,
   FolderOpen,
   Link2,
   MoreHorizontal,
@@ -27,6 +28,7 @@ import { useOpenProjectInEditor } from '@/hooks/useOpenProjectInEditor';
 import { useNavigateWithSearch, useProjectRepos } from '@/hooks';
 import { projectsApi } from '@/lib/api';
 import { LinkProjectDialog } from '@/components/dialogs/projects/LinkProjectDialog';
+import { SprintReleaseNotesDialog } from '@/components/dialogs/projects/ReleaseNotesDialog';
 import { useTranslation } from 'react-i18next';
 import { useProjectMutations } from '@/hooks/useProjectMutations';
 
@@ -95,6 +97,17 @@ function ProjectCard({ project, isFocused, setError, onEdit }: Props) {
     }
   };
 
+  const handleSprintReleaseNotes = async () => {
+    try {
+      await SprintReleaseNotesDialog.show({
+        projectId: project.id,
+        projectName: project.name,
+      });
+    } catch {
+      // User cancelled/closed - do nothing
+    }
+  };
+
   const handleUnlinkProject = () => {
     const confirmed = window.confirm(
       `Are you sure you want to unlink "${project.name}"? The local project will remain, but it will no longer be linked to the remote project.`
@@ -130,6 +143,15 @@ function ProjectCard({ project, isFocused, setError, onEdit }: Props) {
                 >
                   <ExternalLink className="mr-2 h-4 w-4" />
                   {t('viewProject')}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleSprintReleaseNotes();
+                  }}
+                >
+                  <FileText className="mr-2 h-4 w-4" />
+                  Release notes
                 </DropdownMenuItem>
                 {isSingleRepoProject && (
                   <DropdownMenuItem

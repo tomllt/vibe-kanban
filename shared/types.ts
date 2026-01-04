@@ -42,11 +42,17 @@ export type CreateTag = { tag_name: string, content: string, };
 
 export type UpdateTag = { tag_name: string | null, content: string | null, };
 
+export type Sprint = { id: string, project_id: string, name: string, start_at: string, end_at: string, created_at: string, updated_at: string, };
+
+export type CreateSprint = { project_id: string, name: string, start_at: string, end_at: string, };
+
+export type UpdateSprint = { name: string | null, start_at: string | null, end_at: string | null, };
+
 export type TaskStatus = "todo" | "inprogress" | "inreview" | "done" | "cancelled";
 
-export type Task = { id: string, project_id: string, title: string, description: string | null, status: TaskStatus, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, };
+export type Task = { id: string, project_id: string, title: string, description: string | null, status: TaskStatus, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, done_at: string | null, };
 
-export type TaskWithAttemptStatus = { has_in_progress_attempt: boolean, last_attempt_failed: boolean, executor: string, id: string, project_id: string, title: string, description: string | null, status: TaskStatus, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, };
+export type TaskWithAttemptStatus = { has_in_progress_attempt: boolean, last_attempt_failed: boolean, executor: string, id: string, project_id: string, title: string, description: string | null, status: TaskStatus, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, done_at: string | null, };
 
 export type TaskRelationships = { parent_task: Task | null, current_workspace: Workspace, children: Array<Task>, };
 
@@ -183,6 +189,18 @@ export type RegisterRepoRequest = { path: string, display_name: string | null, }
 export type InitRepoRequest = { parent_path: string, folder_name: string, };
 
 export type TagSearchParams = { search: string | null, };
+
+export type CreateSprintRequest = { name: string, start_at: string, end_at: string, };
+
+export type UpdateSprintRequest = { name: string | null, start_at: string | null, end_at: string | null, };
+
+export type ReleaseNotesQuery = { download: boolean | null, };
+
+export type ReleaseNotesTaskItem = { task: Task, pull_requests: Array<PullRequestInfo>, commits: Array<string>, };
+
+export type ReleaseNotesStats = { tasks_done: number, pull_requests: number, commits: number, };
+
+export type ReleaseNotesResponse = { sprint: Sprint, markdown: string, stats: ReleaseNotesStats, tasks: Array<ReleaseNotesTaskItem>, };
 
 export type TokenResponse = { access_token: string, expires_at: string | null, };
 

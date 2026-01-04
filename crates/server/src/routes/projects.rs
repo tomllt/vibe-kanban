@@ -32,6 +32,7 @@ use utils::{
 use uuid::Uuid;
 
 use crate::{DeploymentImpl, error::ApiError, middleware::load_project_middleware};
+use super::sprints;
 
 #[derive(Deserialize, TS)]
 pub struct LinkToExistingRequest {
@@ -600,6 +601,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
             "/repositories",
             get(get_project_repositories).post(add_project_repository),
         )
+        .nest("/sprints", sprints::router(deployment))
         .layer(from_fn_with_state(
             deployment.clone(),
             load_project_middleware,
