@@ -24,7 +24,10 @@ use serde::{Deserialize, Serialize};
 use services::services::{
     container::ContainerService,
     git::{GitCliError, GitServiceError},
-    github::{CreatePrRequest, GitHubService, GitHubServiceError, UnifiedPrComment},
+    github::{
+        CreatePrRequest, CreatePrReviewCommentInput, GitHubService, GitHubServiceError,
+        UnifiedPrComment,
+    },
 };
 use ts_rs::TS;
 use utils::response::ApiResponse;
@@ -84,6 +87,32 @@ pub enum GetPrCommentsError {
 #[derive(Debug, Deserialize, TS)]
 pub struct GetPrCommentsQuery {
     pub repo_id: Uuid,
+}
+
+#[derive(Debug, Deserialize, TS)]
+pub struct SubmitPrReviewCommentsRequest {
+    pub repo_id: Uuid,
+    pub comments: Vec<SubmitPrReviewComment>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+pub struct SubmitPrReviewComment {
+    pub path: String,
+    pub line: i64,
+    /// Expected: "LEFT" or "RIGHT" (defaults to "RIGHT")
+    pub side: Option<String>,
+    pub body: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+pub enum SubmitPrReviewCommentsError {
+    NoPrAttached,
+    GithubCliNotInstalled,
+    GithubCliNotLoggedIn,
+    InsufficientPermissions,
+    InvalidComment { message: String },
 }
 
 pub const DEFAULT_PR_DESCRIPTION_PROMPT: &str = r#"Update the GitHub PR that was just created with a better title and description.
@@ -513,6 +542,107 @@ pub async fn get_pr_comments(
                 )),
                 GitHubServiceError::AuthFailed(_) => Ok(ResponseJson(
                     ApiResponse::error_with_data(GetPrCommentsError::GithubCliNotLoggedIn),
+                )),
+                _ => Err(ApiError::GitHubService(e)),
+            }
+        }
+    }
+}
+
+pub async fn submit_pr_review_comments(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Json(request): Json<SubmitPrReviewCommentsRequest>,
+) -> Result<ResponseJson<ApiResponse<(), SubmitPrReviewCommentsError>>, ApiError> {
+    let pool = &deployment.db().pool;
+
+    let workspace_repo =
+        WorkspaceRepo::find_by_workspace_and_repo_id(pool, workspace.id, request.repo_id)
+            .await?
+            .ok_or(RepoError::NotFound)?;
+
+    let repo = Repo::find_by_id(pool, workspace_repo.repo_id)
+        .await?
+        .ok_or(RepoError::NotFound)?;
+
+    let merges = Merge::find_by_workspace_and_repo_id(pool, workspace.id, request.repo_id).await?;
+    let pr_info = match merges.into_iter().next() {
+        Some(Merge::Pr(pr_merge)) => pr_merge.pr_info,
+        _ => {
+            return Ok(ResponseJson(ApiResponse::error_with_data(
+                SubmitPrReviewCommentsError::NoPrAttached,
+            )));
+        }
+    };
+
+    let mut inputs: Vec<CreatePrReviewCommentInput> = Vec::new();
+    for c in request.comments {
+        if c.path.trim().is_empty() {
+            return Ok(ResponseJson(ApiResponse::error_with_data(
+                SubmitPrReviewCommentsError::InvalidComment {
+                    message: "path is required".to_string(),
+                },
+            )));
+        }
+        if c.line <= 0 {
+            return Ok(ResponseJson(ApiResponse::error_with_data(
+                SubmitPrReviewCommentsError::InvalidComment {
+                    message: "line must be >= 1".to_string(),
+                },
+            )));
+        }
+        if c.body.trim().is_empty() {
+            return Ok(ResponseJson(ApiResponse::error_with_data(
+                SubmitPrReviewCommentsError::InvalidComment {
+                    message: "body is required".to_string(),
+                },
+            )));
+        }
+
+        let side = c.side.unwrap_or_else(|| "RIGHT".to_string()).to_uppercase();
+        if side != "LEFT" && side != "RIGHT" {
+            return Ok(ResponseJson(ApiResponse::error_with_data(
+                SubmitPrReviewCommentsError::InvalidComment {
+                    message: "side must be LEFT or RIGHT".to_string(),
+                },
+            )));
+        }
+
+        inputs.push(CreatePrReviewCommentInput {
+            path: c.path,
+            line: c.line,
+            side,
+            body: c.body,
+        });
+    }
+
+    let github_service = GitHubService::new()?;
+    let repo_info = deployment.git().get_github_repo_info(&repo.path)?;
+
+    match github_service
+        .submit_pr_review_comments(&repo_info, pr_info.number, inputs)
+        .await
+    {
+        Ok(()) => Ok(ResponseJson(ApiResponse::success(()))),
+        Err(e) => {
+            tracing::error!(
+                "Failed to submit PR review comments for attempt {}, PR #{}: {}",
+                workspace.id,
+                pr_info.number,
+                e
+            );
+            match &e {
+                GitHubServiceError::GhCliNotInstalled(_) => Ok(ResponseJson(
+                    ApiResponse::error_with_data(SubmitPrReviewCommentsError::GithubCliNotInstalled),
+                )),
+                GitHubServiceError::AuthFailed(_) => Ok(ResponseJson(
+                    ApiResponse::error_with_data(SubmitPrReviewCommentsError::GithubCliNotLoggedIn),
+                )),
+                GitHubServiceError::InsufficientPermissions(_)
+                | GitHubServiceError::RepoNotFoundOrNoAccess(_) => Ok(ResponseJson(
+                    ApiResponse::error_with_data(
+                        SubmitPrReviewCommentsError::InsufficientPermissions,
+                    ),
                 )),
                 _ => Err(ApiError::GitHubService(e)),
             }

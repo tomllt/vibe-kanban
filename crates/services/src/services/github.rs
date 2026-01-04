@@ -39,6 +39,7 @@ pub enum UnifiedPrComment {
         url: String,
         path: String,
         line: Option<i64>,
+        side: Option<String>,
         diff_hunk: String,
     },
 }
@@ -150,6 +151,14 @@ pub struct CreatePrRequest {
     pub head_branch: String,
     pub base_branch: String,
     pub draft: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatePrReviewCommentInput {
+    pub path: String,
+    pub line: i64,
+    pub side: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +370,7 @@ impl GitHubService {
                 url: c.html_url,
                 path: c.path,
                 line: c.line,
+                side: c.side,
                 diff_hunk: c.diff_hunk,
             });
         }
@@ -369,6 +379,51 @@ impl GitHubService {
         unified.sort_by_key(|c| c.created_at());
 
         Ok(unified)
+    }
+
+    pub async fn submit_pr_review_comments(
+        &self,
+        repo_info: &GitHubRepoInfo,
+        pr_number: i64,
+        comments: Vec<CreatePrReviewCommentInput>,
+    ) -> Result<(), GitHubServiceError> {
+        if comments.is_empty() {
+            return Ok(());
+        }
+
+        let owner = repo_info.owner.clone();
+        let repo = repo_info.repo_name.clone();
+        let cli = self.gh_cli.clone();
+
+        let head_sha = tokio::task::spawn_blocking({
+            let owner = owner.clone();
+            let repo = repo.clone();
+            let cli = cli.clone();
+            move || cli.get_pr_head_sha(&owner, &repo, pr_number)
+        })
+        .await
+            .map_err(|err| {
+                GitHubServiceError::PullRequest(format!(
+                    "Failed to execute GitHub CLI for fetching PR #{pr_number} head SHA: {err}"
+                ))
+            })?
+            .map_err(GitHubServiceError::from)?;
+
+        let owner2 = owner.clone();
+        let repo2 = repo.clone();
+        let cli2 = cli.clone();
+        tokio::task::spawn_blocking(move || {
+            cli2.create_pr_review_with_comments(&owner2, &repo2, pr_number, &head_sha, &comments)
+        })
+        .await
+        .map_err(|err| {
+            GitHubServiceError::PullRequest(format!(
+                "Failed to execute GitHub CLI for creating PR #{pr_number} review comments: {err}"
+            ))
+        })?
+        .map_err(GitHubServiceError::from)?;
+
+        Ok(())
     }
 
     async fn fetch_general_comments(

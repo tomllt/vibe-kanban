@@ -6,6 +6,7 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    io::Write as _,
     process::Command,
 };
 
@@ -17,7 +18,7 @@ use thiserror::Error;
 use ts_rs::TS;
 use utils::shell::resolve_executable_path_blocking;
 
-use crate::services::github::{CreatePrRequest, GitHubRepoInfo};
+use crate::services::github::{CreatePrRequest, CreatePrReviewCommentInput, GitHubRepoInfo};
 
 /// Author information for a PR comment
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -244,6 +245,69 @@ impl GhCli {
             &format!("repos/{owner}/{repo}/pulls/{pr_number}/comments"),
         ])?;
         Self::parse_pr_review_comments(&raw)
+    }
+
+    pub fn get_pr_head_sha(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+    ) -> Result<String, GhCliError> {
+        let raw = self.run(["api", &format!("repos/{owner}/{repo}/pulls/{pr_number}")])?;
+        let value: Value = serde_json::from_str(raw.trim()).map_err(|err| {
+            GhCliError::UnexpectedOutput(format!(
+                "Failed to parse pull request API response: {err}; raw: {raw}"
+            ))
+        })?;
+        value
+            .pointer("/head/sha")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                GhCliError::UnexpectedOutput(format!(
+                    "Pull request API response missing head.sha: {value:#?}"
+                ))
+            })
+    }
+
+    pub fn create_pr_review_with_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+        commit_id: &str,
+        comments: &[CreatePrReviewCommentInput],
+    ) -> Result<(), GhCliError> {
+        let payload = serde_json::json!({
+            "event": "COMMENT",
+            "commit_id": commit_id,
+            "comments": comments.iter().map(|c| serde_json::json!({
+                "path": &c.path,
+                "line": c.line,
+                "side": &c.side,
+                "body": &c.body,
+            })).collect::<Vec<_>>(),
+        });
+
+        let mut tmp =
+            tempfile::NamedTempFile::new().map_err(|e| GhCliError::CommandFailed(e.to_string()))?;
+        tmp.write_all(payload.to_string().as_bytes())
+            .map_err(|e| GhCliError::CommandFailed(e.to_string()))?;
+        tmp.flush()
+            .map_err(|e| GhCliError::CommandFailed(e.to_string()))?;
+
+        let mut args: Vec<OsString> = Vec::new();
+        args.push(OsString::from("api"));
+        args.push(OsString::from("-X"));
+        args.push(OsString::from("POST"));
+        args.push(OsString::from(format!(
+            "repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+        )));
+        args.push(OsString::from("--input"));
+        args.push(tmp.path().as_os_str().to_os_string());
+
+        let _ = self.run(args)?;
+        Ok(())
     }
 }
 

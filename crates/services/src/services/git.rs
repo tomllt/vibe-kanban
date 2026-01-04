@@ -138,6 +138,12 @@ pub enum DiffTarget<'p> {
         repo_path: &'p Path,
         commit_sha: &'p str,
     },
+    /// Arbitrary rev range (branch/tag/commit) head vs base
+    RevRange {
+        repo_path: &'p Path,
+        base_ref: &'p str,
+        head_ref: &'p str,
+    },
 }
 
 impl Default for GitService {
@@ -408,7 +414,51 @@ impl GitService {
 
                 self.convert_diff_to_file_diffs(diff, &repo)
             }
+            DiffTarget::RevRange {
+                repo_path,
+                base_ref,
+                head_ref,
+            } => {
+                let repo = self.open_repo(repo_path)?;
+
+                let base_tree = Self::rev_to_tree(&repo, base_ref)?;
+                let head_tree = Self::rev_to_tree(&repo, head_ref)?;
+
+                let mut diff_opts = git2::DiffOptions::new();
+                diff_opts.include_typechange(true);
+
+                if let Some(paths) = path_filter {
+                    for path in paths {
+                        diff_opts.pathspec(*path);
+                    }
+                }
+
+                let mut diff = repo.diff_tree_to_tree(
+                    Some(&base_tree),
+                    Some(&head_tree),
+                    Some(&mut diff_opts),
+                )?;
+
+                let mut find_opts = git2::DiffFindOptions::new();
+                diff.find_similar(Some(&mut find_opts))?;
+
+                self.convert_diff_to_file_diffs(diff, &repo)
+            }
         }
+    }
+
+    fn rev_to_tree<'repo>(
+        repo: &'repo Repository,
+        rev: &str,
+    ) -> Result<git2::Tree<'repo>, GitServiceError> {
+        let obj = repo.revparse_single(rev).map_err(|e| {
+            GitServiceError::InvalidRepository(format!("Failed to resolve ref '{rev}': {e}"))
+        })?;
+        obj.peel_to_tree().map_err(|e| {
+            GitServiceError::InvalidRepository(format!(
+                "Resolved ref '{rev}' is not a tree-ish object: {e}"
+            ))
+        })
     }
 
     /// Convert git2::Diff to our Diff structs
@@ -1868,5 +1918,73 @@ impl GitService {
         }
 
         Ok(stats)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::Repository;
+    use std::path::Path as StdPath;
+
+    fn commit_file(repo: &Repository, relative_path: &str, contents: &str, message: &str) {
+        let workdir = repo.workdir().expect("repo should have workdir");
+        let abs_path = workdir.join(relative_path);
+        std::fs::create_dir_all(abs_path.parent().unwrap()).unwrap();
+        std::fs::write(&abs_path, contents).unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(StdPath::new(relative_path)).unwrap();
+        let tree_id = index.write_tree().unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+            .unwrap();
+    }
+
+    fn checkout_branch(repo: &Repository, name: &str) {
+        repo.set_head(&format!("refs/heads/{name}")).unwrap();
+        let mut checkout = git2::build::CheckoutBuilder::new();
+        checkout.force();
+        repo.checkout_head(Some(&mut checkout)).unwrap();
+    }
+
+    #[test]
+    fn diffs_support_rev_range_between_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = GitService::new();
+        service
+            .initialize_repo_with_main_branch(dir.path())
+            .unwrap();
+
+        let repo = Repository::open(dir.path()).unwrap();
+
+        commit_file(&repo, "src/a.txt", "one\n", "add a");
+
+        let main = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature", &main, false).unwrap();
+        checkout_branch(&repo, "feature");
+        commit_file(&repo, "src/a.txt", "one\ntwo\n", "edit a");
+
+        let diffs = service
+            .get_diffs(
+                DiffTarget::RevRange {
+                    repo_path: dir.path(),
+                    base_ref: "main",
+                    head_ref: "feature",
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(diffs.len(), 1);
+        let diff = &diffs[0];
+        assert_eq!(diff.new_path.as_deref(), Some("src/a.txt"));
+        assert!(matches!(diff.change, DiffChangeKind::Modified));
+        assert_eq!(diff.old_content.as_deref(), Some("one\n"));
+        assert_eq!(diff.new_content.as_deref(), Some("one\ntwo\n"));
     }
 }
