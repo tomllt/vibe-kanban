@@ -42,17 +42,27 @@ export type CreateTag = { tag_name: string, content: string, };
 
 export type UpdateTag = { tag_name: string | null, content: string | null, };
 
+export type SprintStatus = "planned" | "active" | "closed";
+
+export type Sprint = { id: string, project_id: string, name: string, goal: string | null, start_date: string | null, end_date: string | null, status: SprintStatus, created_at: string, updated_at: string, };
+
+export type CreateSprint = { project_id: string, name: string, goal: string | null, start_date: string | null, end_date: string | null, status: SprintStatus | null, };
+
+export type UpdateSprint = { name: string | null, goal: string | null, start_date: string | null, end_date: string | null, status: SprintStatus | null, };
+
 export type TaskStatus = "todo" | "inprogress" | "inreview" | "done" | "cancelled";
 
-export type Task = { id: string, project_id: string, title: string, description: string | null, status: TaskStatus, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, };
+export type TaskType = "epic" | "feature" | "story" | "task";
 
-export type TaskWithAttemptStatus = { has_in_progress_attempt: boolean, last_attempt_failed: boolean, executor: string, id: string, project_id: string, title: string, description: string | null, status: TaskStatus, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, };
+export type Task = { id: string, project_id: string, title: string, description: string | null, status: TaskStatus, sprint_id: string | null, task_type: TaskType, epic_id: string | null, parent_task_id: string | null, story_points: number | null, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, };
+
+export type TaskWithAttemptStatus = { has_in_progress_attempt: boolean, last_attempt_failed: boolean, executor: string, id: string, project_id: string, title: string, description: string | null, status: TaskStatus, sprint_id: string | null, task_type: TaskType, epic_id: string | null, parent_task_id: string | null, story_points: number | null, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, };
 
 export type TaskRelationships = { parent_task: Task | null, current_workspace: Workspace, children: Array<Task>, };
 
-export type CreateTask = { project_id: string, title: string, description: string | null, status: TaskStatus | null, parent_workspace_id: string | null, image_ids: Array<string> | null, shared_task_id: string | null, };
+export type CreateTask = { project_id: string, title: string, description: string | null, status: TaskStatus | null, sprint_id: string | null, task_type: TaskType | null, epic_id: string | null, parent_task_id: string | null, story_points: number | null, parent_workspace_id: string | null, image_ids: Array<string> | null, shared_task_id: string | null, };
 
-export type UpdateTask = { title: string | null, description: string | null, status: TaskStatus | null, parent_workspace_id: string | null, image_ids: Array<string> | null, };
+export type UpdateTask = { title: string | null, description: string | null, status: TaskStatus | null, sprint_id: string | null, task_type: TaskType | null, epic_id: string | null, parent_task_id: string | null, story_points: number | null, parent_workspace_id: string | null, image_ids: Array<string> | null, };
 
 export type DraftFollowUpData = { message: string, variant: string | null, };
 
@@ -230,7 +240,15 @@ export type AssignSharedTaskRequest = { new_assignee_user_id: string | null, };
 
 export type ShareTaskResponse = { shared_task_id: string, };
 
+export type BacklogQuery = { project_id: string, include_done: boolean, include_cancelled: boolean, include_in_sprint: boolean, };
+
 export type CreateAndStartTaskRequest = { task: CreateTask, executor_profile_id: ExecutorProfileId, repos: Array<WorkspaceRepoInput>, };
+
+export type SprintQuery = { project_id: string, };
+
+export type SprintPlanningTaskIds = { task_ids: Array<string>, };
+
+export type SprintPlanningUpdateResponse = { updated_count: bigint, };
 
 export type CreateGitHubPrRequest = { title: string, body: string | null, target_branch: string | null, draft: boolean | null, repo_id: string, auto_generate_description: boolean, };
 

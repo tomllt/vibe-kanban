@@ -4,6 +4,8 @@ import { I18nextProvider } from 'react-i18next';
 import i18n from '@/i18n';
 import { Projects } from '@/pages/Projects';
 import { ProjectTasks } from '@/pages/ProjectTasks';
+import { ProjectBacklog } from '@/pages/ProjectBacklog';
+import { ProjectSprintPlanning } from '@/pages/ProjectSprintPlanning';
 import { FullAttemptLogsPage } from '@/pages/FullAttemptLogs';
 import { NormalLayout } from '@/components/layout/NormalLayout';
 import { usePostHog } from 'posthog-js/react';
@@ -134,6 +136,14 @@ function AppContent() {
                 <Route
                   path="/projects/:projectId/tasks"
                   element={<ProjectTasks />}
+                />
+                <Route
+                  path="/projects/:projectId/backlog"
+                  element={<ProjectBacklog />}
+                />
+                <Route
+                  path="/projects/:projectId/sprint-planning"
+                  element={<ProjectSprintPlanning />}
                 />
                 <Route path="/settings/*" element={<SettingsLayout />}>
                   <Route index element={<Navigate to="general" replace />} />

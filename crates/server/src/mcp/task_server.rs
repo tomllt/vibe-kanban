@@ -754,6 +754,11 @@ impl TaskServer {
             title,
             description: expanded_description,
             status,
+            sprint_id: None,
+            task_type: None,
+            epic_id: None,
+            parent_task_id: None,
+            story_points: None,
             parent_workspace_id: None,
             image_ids: None,
         };
