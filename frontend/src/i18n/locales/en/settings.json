@@ -123,8 +123,8 @@
           "placeholder": "vk",
           "helper": "Prefix for auto-generated branch names. Leave empty for no prefix.",
           "preview": "Preview:",
-          "previewWithPrefix": "{{prefix}}/1a2b-task-name",
-          "previewNoPrefix": "1a2b-task-name",
+          "previewWithPrefix": "{{prefix}}/feature/1a2b-task-name",
+          "previewNoPrefix": "feature/1a2b-task-name",
           "errors": {
             "slash": "Prefix cannot contain '/'.",
             "startsWithDot": "Prefix cannot start with '.'.",
@@ -132,6 +132,19 @@
             "invalidSequence": "Contains invalid sequence (.., @{).",
             "invalidChars": "Contains invalid characters.",
             "controlChars": "Contains control characters."
+          }
+        },
+        "workflowAutomation": {
+          "title": "Workflow automation",
+          "description": "When enabled, dragging tasks into Staging/Prod will squash-merge and optionally push to the configured branches.",
+          "enabled": {
+            "label": "Enable drag-to-promote"
+          },
+          "stagingBranch": "Staging branch",
+          "prodBranch": "Prod branch",
+          "autoPush": {
+            "label": "Push after merge",
+            "helper": "Pushing triggers CI/CD on GitHub/GitLab remotes."
           }
         }
       },

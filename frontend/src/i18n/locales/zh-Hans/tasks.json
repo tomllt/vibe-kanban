@@ -287,6 +287,9 @@
   "createAttemptDialog": {
     "title": "创建尝试",
     "description": "使用编码代理开始新的尝试。将创建 git 工作树和任务分支。",
+    "branchKind": "分支类型",
+    "branchKindFeature": "功能分支",
+    "branchKindHotfix": "热修复",
     "baseBranch": "基础分支",
     "loadingBranches": "加载分支中...",
     "selectBranch": "选择分支",

@@ -49,7 +49,7 @@ use utils::{
 use uuid::Uuid;
 
 use crate::services::{
-    git::{GitService, GitServiceError},
+    git::{GitBranchKind, GitService, GitServiceError},
     notification::NotificationService,
     share::SharePublisher,
     workspace_manager::WorkspaceError as WorkspaceManagerError,
@@ -609,15 +609,35 @@ pub trait ContainerService {
 
     async fn git_branch_prefix(&self) -> String;
 
-    async fn git_branch_from_workspace(&self, workspace_id: &Uuid, task_title: &str) -> String {
+    async fn git_branch_from_workspace_with_kind(
+        &self,
+        workspace_id: &Uuid,
+        task_title: &str,
+        kind: GitBranchKind,
+    ) -> String {
         let task_title_id = git_branch_id(task_title);
         let prefix = self.git_branch_prefix().await;
+        let kind_segment = match kind {
+            GitBranchKind::Feature => "feature",
+            GitBranchKind::Hotfix => "hotfix",
+        };
 
         if prefix.is_empty() {
-            format!("{}-{}", short_uuid(workspace_id), task_title_id)
+            format!("{}/{}-{}", kind_segment, short_uuid(workspace_id), task_title_id)
         } else {
-            format!("{}/{}-{}", prefix, short_uuid(workspace_id), task_title_id)
+            format!(
+                "{}/{}/{}-{}",
+                prefix,
+                kind_segment,
+                short_uuid(workspace_id),
+                task_title_id
+            )
         }
+    }
+
+    async fn git_branch_from_workspace(&self, workspace_id: &Uuid, task_title: &str) -> String {
+        self.git_branch_from_workspace_with_kind(workspace_id, task_title, GitBranchKind::Feature)
+            .await
     }
 
     async fn stream_raw_logs(

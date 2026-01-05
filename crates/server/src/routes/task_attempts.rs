@@ -44,7 +44,7 @@ use git2::BranchType;
 use serde::{Deserialize, Serialize};
 use services::services::{
     container::ContainerService,
-    git::{ConflictOp, GitCliError, GitServiceError},
+    git::{ConflictOp, GitBranchKind, GitCliError, GitServiceError},
     github::GitHubService,
 };
 use sqlx::Error as SqlxError;
@@ -108,6 +108,9 @@ pub struct CreateTaskAttemptBody {
     pub task_id: Uuid,
     pub executor_profile_id: ExecutorProfileId,
     pub repos: Vec<WorkspaceRepoInput>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub branch_kind: Option<GitBranchKind>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
@@ -154,9 +157,10 @@ pub async fn create_task_attempt(
         .cloned();
 
     let attempt_id = Uuid::new_v4();
+    let branch_kind = payload.branch_kind.unwrap_or(GitBranchKind::Feature);
     let git_branch_name = deployment
         .container()
-        .git_branch_from_workspace(&attempt_id, &task.title)
+        .git_branch_from_workspace_with_kind(&attempt_id, &task.title, branch_kind)
         .await;
 
     let workspace = Workspace::create(

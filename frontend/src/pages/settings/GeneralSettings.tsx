@@ -461,6 +461,119 @@ export function GeneralSettings() {
               )}
             </p>
           </div>
+
+          <div className="space-y-4 rounded-md border p-4">
+            <div className="space-y-1">
+              <div className="font-medium">
+                {t('settings.general.git.workflowAutomation.title')}
+              </div>
+              <p className="text-sm text-muted-foreground">
+                {t('settings.general.git.workflowAutomation.description')}
+              </p>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="workflow-automation-enabled"
+                checked={draft?.workflow_automation?.enabled ?? false}
+                onCheckedChange={(checked: boolean) =>
+                  updateDraft({
+                    workflow_automation: {
+                      ...(draft!.workflow_automation ?? {
+                        enabled: false,
+                        staging_branch: 'staging',
+                        prod_branch: 'main',
+                        auto_push: true,
+                      }),
+                      enabled: checked,
+                    },
+                  })
+                }
+              />
+              <Label
+                htmlFor="workflow-automation-enabled"
+                className="cursor-pointer"
+              >
+                {t('settings.general.git.workflowAutomation.enabled.label')}
+              </Label>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="workflow-staging-branch">
+                  {t('settings.general.git.workflowAutomation.stagingBranch')}
+                </Label>
+                <Input
+                  id="workflow-staging-branch"
+                  value={draft?.workflow_automation?.staging_branch ?? 'staging'}
+                  onChange={(e) =>
+                    updateDraft({
+                      workflow_automation: {
+                        ...(draft!.workflow_automation ?? {
+                          enabled: false,
+                          staging_branch: 'staging',
+                          prod_branch: 'main',
+                          auto_push: true,
+                        }),
+                        staging_branch: e.target.value,
+                      },
+                    })
+                  }
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="workflow-prod-branch">
+                  {t('settings.general.git.workflowAutomation.prodBranch')}
+                </Label>
+                <Input
+                  id="workflow-prod-branch"
+                  value={draft?.workflow_automation?.prod_branch ?? 'main'}
+                  onChange={(e) =>
+                    updateDraft({
+                      workflow_automation: {
+                        ...(draft!.workflow_automation ?? {
+                          enabled: false,
+                          staging_branch: 'staging',
+                          prod_branch: 'main',
+                          auto_push: true,
+                        }),
+                        prod_branch: e.target.value,
+                      },
+                    })
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="workflow-auto-push"
+                checked={draft?.workflow_automation?.auto_push ?? true}
+                onCheckedChange={(checked: boolean) =>
+                  updateDraft({
+                    workflow_automation: {
+                      ...(draft!.workflow_automation ?? {
+                        enabled: false,
+                        staging_branch: 'staging',
+                        prod_branch: 'main',
+                        auto_push: true,
+                      }),
+                      auto_push: checked,
+                    },
+                  })
+                }
+              />
+              <div className="space-y-0.5">
+                <Label htmlFor="workflow-auto-push" className="cursor-pointer">
+                  {t('settings.general.git.workflowAutomation.autoPush.label')}
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  {t('settings.general.git.workflowAutomation.autoPush.helper')}
+                </p>
+              </div>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
