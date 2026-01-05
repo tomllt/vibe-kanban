@@ -35,10 +35,12 @@ pub fn build_task_item(task: Task, merges: Vec<Merge>) -> ReleaseNotesTaskItem {
     let mut commits_set: BTreeSet<String> = BTreeSet::new();
 
     for merge in merges {
-        if let Some(commit) = merge.merge_commit().map(|s| s.trim().to_string()) {
-            if !commit.is_empty() {
-                commits_set.insert(commit);
-            }
+        if let Some(commit) = merge
+            .merge_commit()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            commits_set.insert(commit);
         }
 
         if let Merge::Pr(pr) = merge {

@@ -186,10 +186,8 @@ fn slug_filename(name: &str) -> String {
     for ch in name.trim().chars() {
         if ch.is_ascii_alphanumeric() {
             out.push(ch.to_ascii_lowercase());
-        } else if ch == ' ' || ch == '-' || ch == '_' {
-            if !out.ends_with('-') {
-                out.push('-');
-            }
+        } else if (ch == ' ' || ch == '-' || ch == '_') && !out.ends_with('-') {
+            out.push('-');
         }
     }
     let slug = out.trim_matches('-').to_string();
