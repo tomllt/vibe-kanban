@@ -44,6 +44,8 @@ const DEFAULT_DIFF_COLLAPSE_DEFAULTS: DiffCollapseDefaults = {
 };
 
 const DEFAULT_COLLAPSE_MAX_LINES = 200;
+const EMPTY_DIFFS: Diff[] = [];
+const EMPTY_PR_COMMENTS: UnifiedPrComment[] = [];
 
 const exceedsMaxLineCount = (d: Diff, maxLines: number): boolean => {
   if (d.additions != null || d.deletions != null)
@@ -99,13 +101,19 @@ export function DiffsPanel({ selectedAttempt, gitOps }: DiffsPanelProps) {
     }
   );
 
-  const prComments = prCommentsQuery.data?.comments ?? [];
+  const prComments = prCommentsQuery.data?.comments ?? EMPTY_PR_COMMENTS;
 
-  const diffs = diffSource === 'branch' ? repoDiff.data ?? [] : worktreeDiffs;
-  const error =
-    diffSource === 'branch'
-      ? (repoDiff.error as Error | null)?.message ?? null
-      : worktreeError;
+  const diffs = useMemo(() => {
+    if (diffSource === 'branch') return repoDiff.data ?? EMPTY_DIFFS;
+    return worktreeDiffs;
+  }, [diffSource, repoDiff.data, worktreeDiffs]);
+
+  const error = useMemo(() => {
+    if (diffSource === 'branch') {
+      return (repoDiff.error as Error | null)?.message ?? null;
+    }
+    return worktreeError;
+  }, [diffSource, repoDiff.error, worktreeError]);
 
   const { fileCount, added, deleted } = useMemo(() => {
     if (diffs.length === 0) return { fileCount: 0, added: 0, deleted: 0 };

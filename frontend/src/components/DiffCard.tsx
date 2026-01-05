@@ -157,20 +157,20 @@ export default function DiffCard({
     [comments, filePath]
   );
 
+  type ReviewPrComment = Extract<UnifiedPrComment, { comment_type: 'review' }>;
+
   const prReviewCommentsForFile = useMemo(() => {
     const candidates = new Set<string>();
     if (newName) candidates.add(newName);
     if (oldName) candidates.add(oldName);
 
     return (prComments ?? []).filter(
-      (c) =>
+      (c): c is ReviewPrComment =>
         c.comment_type === 'review' &&
         candidates.has(c.path) &&
         c.line != null
     );
   }, [oldName, newName, prComments]);
-
-  type ReviewPrComment = Extract<UnifiedPrComment, { comment_type: 'review' }>;
 
   type LineCommentData =
     | { kind: 'local'; comment: ReviewComment }
@@ -207,7 +207,7 @@ export default function DiffCard({
       target[lineKey] = {
         data: [
           ...existing,
-          { kind: 'github', comment: comment as ReviewPrComment },
+          { kind: 'github', comment },
         ],
       };
     });
