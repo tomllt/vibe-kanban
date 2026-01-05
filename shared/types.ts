@@ -54,11 +54,43 @@ export type PromotionStatus = "pending" | "succeeded" | "failed";
 
 export type EnvironmentPromotion = { id: string, task_id: string, workspace_id: string | null, environment: WorkflowEnvironment, status: PromotionStatus, target_branch: string, merge_commit_sha: string | null, message: string | null, created_at: string, updated_at: string, };
 
+export type TaskStatusEvent = { id: string, task_id: string, project_id: string, status: TaskStatus, created_at: Date, };
+
 export type TaskRelationships = { parent_task: Task | null, current_workspace: Workspace, children: Array<Task>, };
 
 export type CreateTask = { project_id: string, title: string, description: string | null, status: TaskStatus | null, parent_workspace_id: string | null, image_ids: Array<string> | null, shared_task_id: string | null, };
 
 export type UpdateTask = { title: string | null, description: string | null, status: TaskStatus | null, parent_workspace_id: string | null, image_ids: Array<string> | null, };
+
+export type AnalyticsBucket = "day";
+
+export type BurndownPoint = { ts: Date, remaining: bigint, total: bigint, };
+
+export type BurndownResponse = { points: Array<BurndownPoint>, };
+
+export type CfdPoint = { ts: Date, todo: bigint, inprogress: bigint, inreview: bigint, done: bigint, cancelled: bigint, };
+
+export type CfdResponse = { points: Array<CfdPoint>, };
+
+export type CycleTimeHistogramBucket = { 
+/**
+ * Inclusive lower bound (hours)
+ */
+from_hours: bigint, 
+/**
+ * Exclusive upper bound (hours)
+ */
+to_hours: bigint, count: bigint, };
+
+export type CycleTimeResponse = { sample_size: bigint, mean_hours: number, p50_hours: number, p75_hours: number, p90_hours: number, p95_hours: number, histogram: Array<CycleTimeHistogramBucket>, };
+
+export type AnalyticsPoint = { ts: Date, value: bigint, };
+
+export type FileHotspot = { path: string, commit_count: bigint, last_modified_at: Date, };
+
+export type RepoHotspots = { repo_id: string, repo_display_name: string, files: Array<FileHotspot>, };
+
+export type DevExResponse = { agent_turns: Array<AnalyticsPoint>, agent_runs: Array<AnalyticsPoint>, tasks_touched: bigint, hotspots: Array<RepoHotspots>, };
 
 export type DraftFollowUpData = { message: string, variant: string | null, };
 

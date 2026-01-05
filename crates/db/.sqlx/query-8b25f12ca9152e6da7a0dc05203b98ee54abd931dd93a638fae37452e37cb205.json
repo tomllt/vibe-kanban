@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cat.created_at as \"created_at!: DateTime<Utc>\"\n           FROM coding_agent_turns cat\n           JOIN execution_processes ep ON ep.id = cat.execution_process_id\n           JOIN sessions s ON s.id = ep.session_id\n           JOIN workspaces w ON w.id = s.workspace_id\n           JOIN tasks t ON t.id = w.task_id\n          WHERE t.project_id = $1\n            AND cat.created_at >= $2\n            AND cat.created_at <= $3\n          ORDER BY cat.created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "created_at!: DateTime<Utc>",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8b25f12ca9152e6da7a0dc05203b98ee54abd931dd93a638fae37452e37cb205"
+}
