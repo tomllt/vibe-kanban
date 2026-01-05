@@ -163,6 +163,18 @@ impl GitCli {
         Ok(!out.is_empty())
     }
 
+    /// Resolve a git revision to its full SHA.
+    pub fn rev_parse(&self, worktree_path: &Path, rev: &str) -> Result<String, GitCliError> {
+        let out = self.git(worktree_path, ["rev-parse", "--verify", rev])?;
+        let value = out.lines().next().unwrap_or("").trim();
+        if value.is_empty() {
+            return Err(GitCliError::CommandFailed(format!(
+                "rev-parse produced empty output for {rev}"
+            )));
+        }
+        Ok(value.to_string())
+    }
+
     /// Diff status vs a base branch using a temporary index (always includes untracked).
     /// Path filter limits the reported paths.
     pub fn diff_status(

@@ -761,6 +761,11 @@ export function ProjectTasks() {
           title: task.title,
           description: task.description,
           status: newStatus,
+          sprint_id: task.sprint_id,
+          task_type: task.task_type,
+          epic_id: task.epic_id,
+          parent_task_id: task.parent_task_id,
+          story_points: task.story_points,
           parent_workspace_id: task.parent_workspace_id,
           image_ids: null,
         });

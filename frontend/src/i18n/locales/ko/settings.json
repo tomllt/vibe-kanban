@@ -123,8 +123,8 @@
           "placeholder": "vk",
           "helper": "자동 생성된 브랜치 이름의 접두사입니다. 접두사가 없으려면 비워두세요.",
           "preview": "미리보기:",
-          "previewWithPrefix": "{{prefix}}/1a2b-task-name",
-          "previewNoPrefix": "1a2b-task-name",
+          "previewWithPrefix": "{{prefix}}/feature/1a2b-task-name",
+          "previewNoPrefix": "feature/1a2b-task-name",
           "errors": {
             "slash": "접두사에는 '/'를 포함할 수 없습니다.",
             "startsWithDot": "접두사는 '.'로 시작할 수 없습니다.",
@@ -132,6 +132,19 @@
             "invalidSequence": "유효하지 않은 시퀀스(.., @{)가 포함되어 있습니다.",
             "invalidChars": "유효하지 않은 문자가 포함되어 있습니다.",
             "controlChars": "제어 문자가 포함되어 있습니다."
+          }
+        },
+        "workflowAutomation": {
+          "title": "워크플로 자동화",
+          "description": "활성화하면 작업을 Staging/Prod로 드래그할 때 squash-merge를 수행하고(선택적으로) 설정된 브랜치로 push 합니다.",
+          "enabled": {
+            "label": "드래그로 승격 활성화"
+          },
+          "stagingBranch": "Staging 브랜치",
+          "prodBranch": "Prod 브랜치",
+          "autoPush": {
+            "label": "머지 후 push",
+            "helper": "push는 GitHub/GitLab 원격의 CI/CD를 트리거합니다."
           }
         }
       },

@@ -5,7 +5,7 @@ use strum_macros::{Display, EnumString};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use super::{project::Project, workspace::Workspace};
+use super::{environment_promotion::EnvironmentPromotion, project::Project, workspace::Workspace};
 
 #[derive(
     Debug, Clone, Type, Serialize, Deserialize, PartialEq, TS, EnumString, Display, Default,
@@ -22,6 +22,20 @@ pub enum TaskStatus {
     Cancelled,
 }
 
+#[derive(
+    Debug, Clone, Type, Serialize, Deserialize, PartialEq, TS, EnumString, Display, Default,
+)]
+#[sqlx(type_name = "task_type", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum TaskType {
+    Epic,
+    Feature,
+    Story,
+    #[default]
+    Task,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, TS)]
 pub struct Task {
     pub id: Uuid,
@@ -29,6 +43,11 @@ pub struct Task {
     pub title: String,
     pub description: Option<String>,
     pub status: TaskStatus,
+    pub sprint_id: Option<Uuid>,
+    pub task_type: TaskType,
+    pub epic_id: Option<Uuid>,
+    pub parent_task_id: Option<Uuid>,
+    pub story_points: Option<i32>,
     pub parent_workspace_id: Option<Uuid>, // Foreign key to parent Workspace
     pub shared_task_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
@@ -44,6 +63,8 @@ pub struct TaskWithAttemptStatus {
     pub has_in_progress_attempt: bool,
     pub last_attempt_failed: bool,
     pub executor: String,
+    #[serde(default)]
+    pub environment_promotions: Option<Vec<EnvironmentPromotion>>,
 }
 
 impl std::ops::Deref for TaskWithAttemptStatus {
@@ -72,6 +93,11 @@ pub struct CreateTask {
     pub title: String,
     pub description: Option<String>,
     pub status: Option<TaskStatus>,
+    pub sprint_id: Option<Uuid>,
+    pub task_type: Option<TaskType>,
+    pub epic_id: Option<Uuid>,
+    pub parent_task_id: Option<Uuid>,
+    pub story_points: Option<i32>,
     pub parent_workspace_id: Option<Uuid>,
     pub image_ids: Option<Vec<Uuid>>,
     pub shared_task_id: Option<Uuid>,
@@ -88,6 +114,11 @@ impl CreateTask {
             title,
             description,
             status: Some(TaskStatus::Todo),
+            sprint_id: None,
+            task_type: Some(TaskType::Task),
+            epic_id: None,
+            parent_task_id: None,
+            story_points: None,
             parent_workspace_id: None,
             image_ids: None,
             shared_task_id: None,
@@ -106,6 +137,11 @@ impl CreateTask {
             title,
             description,
             status: Some(status),
+            sprint_id: None,
+            task_type: Some(TaskType::Task),
+            epic_id: None,
+            parent_task_id: None,
+            story_points: None,
             parent_workspace_id: None,
             image_ids: None,
             shared_task_id: Some(shared_task_id),
@@ -118,8 +154,31 @@ pub struct UpdateTask {
     pub title: Option<String>,
     pub description: Option<String>,
     pub status: Option<TaskStatus>,
-    pub parent_workspace_id: Option<Uuid>,
+    #[serde(default)]
+    pub sprint_id: Option<Option<Uuid>>,
+    pub task_type: Option<TaskType>,
+    #[serde(default)]
+    pub epic_id: Option<Option<Uuid>>,
+    #[serde(default)]
+    pub parent_task_id: Option<Option<Uuid>>,
+    #[serde(default)]
+    pub story_points: Option<Option<i32>>,
+    #[serde(default)]
+    pub parent_workspace_id: Option<Option<Uuid>>,
     pub image_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateTaskData {
+    pub title: String,
+    pub description: Option<String>,
+    pub status: TaskStatus,
+    pub sprint_id: Option<Uuid>,
+    pub task_type: TaskType,
+    pub epic_id: Option<Uuid>,
+    pub parent_task_id: Option<Uuid>,
+    pub story_points: Option<i32>,
+    pub parent_workspace_id: Option<Uuid>,
 }
 
 impl Task {
@@ -143,14 +202,18 @@ impl Task {
             r#"SELECT
   t.id                            AS "id!: Uuid",
   t.project_id                    AS "project_id!: Uuid",
-  t.title,
-  t.description,
-  t.status                        AS "status!: TaskStatus",
-  t.parent_workspace_id           AS "parent_workspace_id: Uuid",
-  t.shared_task_id                AS "shared_task_id: Uuid",
-  t.created_at                    AS "created_at!: DateTime<Utc>",
-  t.updated_at                    AS "updated_at!: DateTime<Utc>",
-  t.done_at                       AS "done_at: DateTime<Utc>",
+	  t.title,
+	  t.description,
+	  t.status                        AS "status!: TaskStatus",
+	  t.sprint_id                     AS "sprint_id: Uuid",
+	  t.task_type                     AS "task_type!: TaskType",
+	  t.epic_id                       AS "epic_id: Uuid",
+	  t.parent_task_id                AS "parent_task_id: Uuid",
+	  t.story_points                  AS "story_points: i32",
+	  t.parent_workspace_id           AS "parent_workspace_id: Uuid",
+	  t.shared_task_id                AS "shared_task_id: Uuid",
+	  t.created_at                    AS "created_at!: DateTime<Utc>",
+	  t.updated_at                    AS "updated_at!: DateTime<Utc>",
 
   CASE WHEN EXISTS (
     SELECT 1
@@ -191,26 +254,49 @@ ORDER BY t.created_at DESC"#,
         .fetch_all(pool)
         .await?;
 
-        let tasks = records
+        let mut tasks: Vec<TaskWithAttemptStatus> = records
             .into_iter()
             .map(|rec| TaskWithAttemptStatus {
-                task: Task {
-                    id: rec.id,
-                    project_id: rec.project_id,
-                    title: rec.title,
-                    description: rec.description,
-                    status: rec.status,
-                    parent_workspace_id: rec.parent_workspace_id,
-                    shared_task_id: rec.shared_task_id,
-                    created_at: rec.created_at,
-                    updated_at: rec.updated_at,
-                    done_at: rec.done_at,
-                },
+	                task: Task {
+	                    id: rec.id,
+	                    project_id: rec.project_id,
+	                    title: rec.title,
+	                    description: rec.description,
+	                    status: rec.status,
+	                    sprint_id: rec.sprint_id,
+	                    task_type: rec.task_type,
+	                    epic_id: rec.epic_id,
+	                    parent_task_id: rec.parent_task_id,
+	                    story_points: rec.story_points,
+	                    parent_workspace_id: rec.parent_workspace_id,
+	                    shared_task_id: rec.shared_task_id,
+	                    created_at: rec.created_at,
+	                    updated_at: rec.updated_at,
+	                },
                 has_in_progress_attempt: rec.has_in_progress_attempt != 0,
                 last_attempt_failed: rec.last_attempt_failed != 0,
                 executor: rec.executor,
+                environment_promotions: None,
             })
             .collect();
+
+        // Attach latest environment promotion statuses (staging/prod) for each task.
+        let task_ids: Vec<Uuid> = tasks.iter().map(|t| t.id).collect();
+        let promotions = EnvironmentPromotion::latest_by_task_ids(pool, &task_ids).await?;
+
+        if !promotions.is_empty() {
+            let mut by_task: std::collections::HashMap<Uuid, Vec<EnvironmentPromotion>> =
+                std::collections::HashMap::new();
+            for promotion in promotions {
+                by_task.entry(promotion.task_id).or_default().push(promotion);
+            }
+
+            for task in &mut tasks {
+                if let Some(list) = by_task.get(&task.id) {
+                    task.environment_promotions = Some(list.clone());
+                }
+            }
+        }
 
         Ok(tasks)
     }
@@ -218,7 +304,21 @@ ORDER BY t.created_at DESC"#,
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as!(
             Task,
-            r#"SELECT id as "id!: Uuid", project_id as "project_id!: Uuid", title, description, status as "status!: TaskStatus", parent_workspace_id as "parent_workspace_id: Uuid", shared_task_id as "shared_task_id: Uuid", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", done_at as "done_at: DateTime<Utc>"
+            r#"SELECT
+                  id as "id!: Uuid",
+                  project_id as "project_id!: Uuid",
+                  title,
+                  description,
+                  status as "status!: TaskStatus",
+                  sprint_id as "sprint_id: Uuid",
+                  task_type as "task_type!: TaskType",
+                  epic_id as "epic_id: Uuid",
+                  parent_task_id as "parent_task_id: Uuid",
+                  story_points as "story_points: i32",
+                  parent_workspace_id as "parent_workspace_id: Uuid",
+                  shared_task_id as "shared_task_id: Uuid",
+                  created_at as "created_at!: DateTime<Utc>",
+                  updated_at as "updated_at!: DateTime<Utc>"
                FROM tasks
                WHERE id = $1"#,
             id
@@ -230,7 +330,21 @@ ORDER BY t.created_at DESC"#,
     pub async fn find_by_rowid(pool: &SqlitePool, rowid: i64) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as!(
             Task,
-            r#"SELECT id as "id!: Uuid", project_id as "project_id!: Uuid", title, description, status as "status!: TaskStatus", parent_workspace_id as "parent_workspace_id: Uuid", shared_task_id as "shared_task_id: Uuid", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", done_at as "done_at: DateTime<Utc>"
+            r#"SELECT
+                  id as "id!: Uuid",
+                  project_id as "project_id!: Uuid",
+                  title,
+                  description,
+                  status as "status!: TaskStatus",
+                  sprint_id as "sprint_id: Uuid",
+                  task_type as "task_type!: TaskType",
+                  epic_id as "epic_id: Uuid",
+                  parent_task_id as "parent_task_id: Uuid",
+                  story_points as "story_points: i32",
+                  parent_workspace_id as "parent_workspace_id: Uuid",
+                  shared_task_id as "shared_task_id: Uuid",
+                  created_at as "created_at!: DateTime<Utc>",
+                  updated_at as "updated_at!: DateTime<Utc>"
                FROM tasks
                WHERE rowid = $1"#,
             rowid
@@ -248,7 +362,21 @@ ORDER BY t.created_at DESC"#,
     {
         sqlx::query_as!(
             Task,
-            r#"SELECT id as "id!: Uuid", project_id as "project_id!: Uuid", title, description, status as "status!: TaskStatus", parent_workspace_id as "parent_workspace_id: Uuid", shared_task_id as "shared_task_id: Uuid", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", done_at as "done_at: DateTime<Utc>"
+            r#"SELECT
+                  id as "id!: Uuid",
+                  project_id as "project_id!: Uuid",
+                  title,
+                  description,
+                  status as "status!: TaskStatus",
+                  sprint_id as "sprint_id: Uuid",
+                  task_type as "task_type!: TaskType",
+                  epic_id as "epic_id: Uuid",
+                  parent_task_id as "parent_task_id: Uuid",
+                  story_points as "story_points: i32",
+                  parent_workspace_id as "parent_workspace_id: Uuid",
+                  shared_task_id as "shared_task_id: Uuid",
+                  created_at as "created_at!: DateTime<Utc>",
+                  updated_at as "updated_at!: DateTime<Utc>"
                FROM tasks
                WHERE shared_task_id = $1
                LIMIT 1"#,
@@ -261,7 +389,21 @@ ORDER BY t.created_at DESC"#,
     pub async fn find_all_shared(pool: &SqlitePool) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as!(
             Task,
-            r#"SELECT id as "id!: Uuid", project_id as "project_id!: Uuid", title, description, status as "status!: TaskStatus", parent_workspace_id as "parent_workspace_id: Uuid", shared_task_id as "shared_task_id: Uuid", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", done_at as "done_at: DateTime<Utc>"
+            r#"SELECT
+                  id as "id!: Uuid",
+                  project_id as "project_id!: Uuid",
+                  title,
+                  description,
+                  status as "status!: TaskStatus",
+                  sprint_id as "sprint_id: Uuid",
+                  task_type as "task_type!: TaskType",
+                  epic_id as "epic_id: Uuid",
+                  parent_task_id as "parent_task_id: Uuid",
+                  story_points as "story_points: i32",
+                  parent_workspace_id as "parent_workspace_id: Uuid",
+                  shared_task_id as "shared_task_id: Uuid",
+                  created_at as "created_at!: DateTime<Utc>",
+                  updated_at as "updated_at!: DateTime<Utc>"
                FROM tasks
                WHERE shared_task_id IS NOT NULL"#
         )
@@ -275,21 +417,49 @@ ORDER BY t.created_at DESC"#,
         task_id: Uuid,
     ) -> Result<Self, sqlx::Error> {
         let status = data.status.clone().unwrap_or_default();
-        let done_at = if status == TaskStatus::Done {
-            Some(Utc::now())
-        } else {
-            None
-        };
+        let task_type = data.task_type.clone().unwrap_or_default();
         sqlx::query_as!(
             Task,
-            r#"INSERT INTO tasks (id, project_id, title, description, status, parent_workspace_id, shared_task_id, done_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-               RETURNING id as "id!: Uuid", project_id as "project_id!: Uuid", title, description, status as "status!: TaskStatus", parent_workspace_id as "parent_workspace_id: Uuid", shared_task_id as "shared_task_id: Uuid", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", done_at as "done_at: DateTime<Utc>""#,
+            r#"INSERT INTO tasks (
+                  id,
+                  project_id,
+                  title,
+                  description,
+                  status,
+                  sprint_id,
+                  task_type,
+                  epic_id,
+                  parent_task_id,
+                  story_points,
+                  parent_workspace_id,
+                  shared_task_id
+                )
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+               RETURNING
+                  id as "id!: Uuid",
+                  project_id as "project_id!: Uuid",
+                  title,
+                  description,
+                  status as "status!: TaskStatus",
+                  sprint_id as "sprint_id: Uuid",
+                  task_type as "task_type!: TaskType",
+                  epic_id as "epic_id: Uuid",
+                  parent_task_id as "parent_task_id: Uuid",
+                  story_points as "story_points: i32",
+                  parent_workspace_id as "parent_workspace_id: Uuid",
+                  shared_task_id as "shared_task_id: Uuid",
+                  created_at as "created_at!: DateTime<Utc>",
+                  updated_at as "updated_at!: DateTime<Utc>""#,
             task_id,
             data.project_id,
             data.title,
             data.description,
             status,
+            data.sprint_id,
+            task_type,
+            data.epic_id,
+            data.parent_task_id,
+            data.story_points,
             data.parent_workspace_id,
             data.shared_task_id,
             done_at
@@ -302,10 +472,7 @@ ORDER BY t.created_at DESC"#,
         pool: &SqlitePool,
         id: Uuid,
         project_id: Uuid,
-        title: String,
-        description: Option<String>,
-        status: TaskStatus,
-        parent_workspace_id: Option<Uuid>,
+        data: UpdateTaskData,
     ) -> Result<Self, sqlx::Error> {
         sqlx::query_as!(
             Task,
@@ -313,21 +480,40 @@ ORDER BY t.created_at DESC"#,
                SET title = $3,
                    description = $4,
                    status = $5,
-                   parent_workspace_id = $6,
-                   done_at = CASE
-                     WHEN $5 = 'done' AND done_at IS NULL THEN datetime('now', 'subsec')
-                     WHEN $5 != 'done' THEN NULL
-                     ELSE done_at
-                   END,
+                   sprint_id = $6,
+                   task_type = $7,
+                   epic_id = $8,
+                   parent_task_id = $9,
+                   story_points = $10,
+                   parent_workspace_id = $11,
                    updated_at = datetime('now', 'subsec')
                WHERE id = $1 AND project_id = $2
-               RETURNING id as "id!: Uuid", project_id as "project_id!: Uuid", title, description, status as "status!: TaskStatus", parent_workspace_id as "parent_workspace_id: Uuid", shared_task_id as "shared_task_id: Uuid", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", done_at as "done_at: DateTime<Utc>""#,
+               RETURNING
+                  id as "id!: Uuid",
+                  project_id as "project_id!: Uuid",
+                  title,
+                  description,
+                  status as "status!: TaskStatus",
+                  sprint_id as "sprint_id: Uuid",
+                  task_type as "task_type!: TaskType",
+                  epic_id as "epic_id: Uuid",
+                  parent_task_id as "parent_task_id: Uuid",
+                  story_points as "story_points: i32",
+                  parent_workspace_id as "parent_workspace_id: Uuid",
+                  shared_task_id as "shared_task_id: Uuid",
+                  created_at as "created_at!: DateTime<Utc>",
+                  updated_at as "updated_at!: DateTime<Utc>""#,
             id,
             project_id,
-            title,
-            description,
-            status,
-            parent_workspace_id
+            data.title,
+            data.description,
+            data.status,
+            data.sprint_id,
+            data.task_type,
+            data.epic_id,
+            data.parent_task_id,
+            data.story_points,
+            data.parent_workspace_id
         )
         .fetch_one(pool)
         .await
@@ -510,7 +696,21 @@ ORDER BY t.created_at DESC"#,
         // Find only child tasks that have this workspace as their parent
         sqlx::query_as!(
             Task,
-            r#"SELECT id as "id!: Uuid", project_id as "project_id!: Uuid", title, description, status as "status!: TaskStatus", parent_workspace_id as "parent_workspace_id: Uuid", shared_task_id as "shared_task_id: Uuid", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", done_at as "done_at: DateTime<Utc>"
+            r#"SELECT
+                  id as "id!: Uuid",
+                  project_id as "project_id!: Uuid",
+                  title,
+                  description,
+                  status as "status!: TaskStatus",
+                  sprint_id as "sprint_id: Uuid",
+                  task_type as "task_type!: TaskType",
+                  epic_id as "epic_id: Uuid",
+                  parent_task_id as "parent_task_id: Uuid",
+                  story_points as "story_points: i32",
+                  parent_workspace_id as "parent_workspace_id: Uuid",
+                  shared_task_id as "shared_task_id: Uuid",
+                  created_at as "created_at!: DateTime<Utc>",
+                  updated_at as "updated_at!: DateTime<Utc>"
                FROM tasks
                WHERE parent_workspace_id = $1
                ORDER BY created_at DESC"#,

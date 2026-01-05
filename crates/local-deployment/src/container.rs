@@ -31,6 +31,7 @@ use executors::{
         Executable, ExecutorAction, ExecutorActionType,
         coding_agent_follow_up::CodingAgentFollowUpRequest,
         coding_agent_initial::CodingAgentInitialRequest,
+        script::ScriptContext,
     },
     approvals::{ExecutorApprovalService, NoopExecutorApprovalService},
     env::ExecutionEnv,
@@ -431,6 +432,13 @@ impl LocalContainerService {
 
                 if success || cleanup_done {
                     // Commit changes (if any) and get feedback about whether changes were made
+                    let force_next_action = ctx
+                        .execution_process
+                        .executor_action()
+                        .ok()
+                        .map(has_conflict_test_next_action)
+                        .unwrap_or(false);
+
                     let changes_committed = match container.try_commit_changes(&ctx).await {
                         Ok(committed) => committed,
                         Err(e) => {
@@ -444,7 +452,7 @@ impl LocalContainerService {
                         ctx.execution_process.run_reason,
                         ExecutionProcessRunReason::CodingAgent
                     ) {
-                        changes_committed
+                        force_next_action || changes_committed
                     } else {
                         true
                     };
@@ -865,6 +873,16 @@ fn failure_exit_status() -> std::process::ExitStatus {
         use std::os::windows::process::ExitStatusExt;
         ExitStatusExt::from_raw(1)
     }
+}
+
+fn has_conflict_test_next_action(action: &ExecutorAction) -> bool {
+    action.next_action().is_some_and(|next| {
+        matches!(
+            next.typ(),
+            ExecutorActionType::ScriptRequest(request)
+                if request.context == ScriptContext::ConflictTests
+        )
+    })
 }
 
 #[async_trait]
@@ -1294,6 +1312,12 @@ impl ContainerService for LocalContainerService {
             ctx.execution_process.run_reason,
             ExecutionProcessRunReason::CodingAgent | ExecutionProcessRunReason::CleanupScript,
         ) {
+            return Ok(false);
+        }
+
+        if let Ok(action) = ctx.execution_process.executor_action()
+            && has_conflict_test_next_action(action)
+        {
             return Ok(false);
         }
 

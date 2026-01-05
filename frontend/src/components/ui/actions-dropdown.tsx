@@ -21,6 +21,7 @@ import { EditBranchNameDialog } from '@/components/dialogs/tasks/EditBranchNameD
 import { ShareDialog } from '@/components/dialogs/tasks/ShareDialog';
 import { ReassignDialog } from '@/components/dialogs/tasks/ReassignDialog';
 import { StopShareTaskDialog } from '@/components/dialogs/tasks/StopShareTaskDialog';
+import { BacklogGroomerDialog } from '@/components/dialogs/tasks/BacklogGroomerDialog';
 import { useProject } from '@/contexts/ProjectContext';
 import { openTaskForm } from '@/lib/openTaskForm';
 
@@ -49,6 +50,20 @@ export function ActionsDropdown({
   const hasTaskActions = Boolean(task);
   const isShared = Boolean(sharedTask);
   const canEditShared = (!isShared && !task?.shared_task_id) || isSignedIn;
+  const isMinimalStory =
+    Boolean(task) &&
+    (() => {
+      const title = task?.title?.trim() || '';
+      const descLen = (task?.description || '').trim().length;
+      const lower = title.toLowerCase();
+      const looksLikeStory =
+        lower.startsWith('story:') ||
+        lower.startsWith('user story:') ||
+        lower.startsWith('[story]') ||
+        lower.startsWith('as a ') ||
+        lower.startsWith('as an ');
+      return looksLikeStory && descLen < 60;
+    })();
 
   const handleEdit = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -158,6 +173,12 @@ export function ActionsDropdown({
     StopShareTaskDialog.show({ sharedTask });
   };
 
+  const handleBacklogGroom = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!task) return;
+    BacklogGroomerDialog.show({ task });
+  };
+
   const canReassign =
     Boolean(task) &&
     Boolean(sharedTask) &&
@@ -255,6 +276,14 @@ export function ActionsDropdown({
               >
                 {t('common:buttons.edit')}
               </DropdownMenuItem>
+              {isMinimalStory && (
+                <DropdownMenuItem
+                  disabled={!canEditShared}
+                  onClick={handleBacklogGroom}
+                >
+                  {t('actionsMenu.groomStory')}
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem disabled={!projectId} onClick={handleDuplicate}>
                 {t('actionsMenu.duplicate')}
               </DropdownMenuItem>

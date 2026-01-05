@@ -29,6 +29,7 @@ import { ScratchType, type TaskWithAttemptStatus } from 'shared/types';
 import { useBranchStatus } from '@/hooks';
 import { useAttemptRepo } from '@/hooks/useAttemptRepo';
 import { useAttemptExecution } from '@/hooks/useAttemptExecution';
+import { useResolveConflicts } from '@/hooks/useResolveConflicts';
 import { useUserSystem } from '@/components/ConfigProvider';
 import { cn } from '@/lib/utils';
 //
@@ -51,6 +52,7 @@ import type {
   DraftFollowUpData,
   ExecutorAction,
   ExecutorProfileId,
+  ExecutionProcess,
 } from 'shared/types';
 import { buildResolveConflictsInstructions } from '@/lib/conflicts';
 import { useTranslation } from 'react-i18next';
@@ -65,6 +67,18 @@ import type { Session } from 'shared/types';
 interface TaskFollowUpSectionProps {
   task: TaskWithAttemptStatus;
   session?: Session;
+}
+
+type ConflictResolutionStatus = {
+  tone: 'default' | 'success' | 'destructive';
+  message: string;
+};
+
+function isConflictTestProcess(process: ExecutionProcess): boolean {
+  const typ = process.executor_action?.typ;
+  return (
+    typ?.type === 'ScriptRequest' && typ.context === 'ConflictTests'
+  );
 }
 
 export function TaskFollowUpSection({
@@ -96,8 +110,85 @@ export function TaskFollowUpSection({
       ),
     [branchStatus]
   );
+  const {
+    resolveConflicts,
+    isResolving,
+    resolveError,
+    resolveProcessId,
+    resolveStartedAt,
+  } = useResolveConflicts(workspaceId);
   const { branch: attemptBranch, refetch: refetchAttemptBranch } =
     useAttemptBranch(workspaceId);
+  const resolveProcess = useMemo(() => {
+    if (!resolveProcessId) return null;
+    return processes.find((process) => process.id === resolveProcessId) ?? null;
+  }, [processes, resolveProcessId]);
+
+  const conflictTestProcess = useMemo(() => {
+    const anchor = resolveProcess?.created_at ?? resolveStartedAt;
+    if (!anchor) return null;
+    const anchorTime = new Date(anchor).getTime();
+    return (
+      processes
+        .filter(
+          (process) =>
+            isConflictTestProcess(process) &&
+            new Date(process.created_at).getTime() >= anchorTime
+        )
+        .slice(-1)[0] ?? null
+    );
+  }, [processes, resolveProcess, resolveStartedAt]);
+
+  const conflictResolutionStatus = useMemo<ConflictResolutionStatus | null>(
+    () => {
+      if (!resolveProcessId) return null;
+      if (!resolveProcess) {
+        return {
+          tone: 'default',
+          message: 'Starting conflict resolution...',
+        };
+      }
+      if (resolveProcess.status === 'running') {
+        return {
+          tone: 'default',
+          message: 'Resolving conflicts with AI...',
+        };
+      }
+      if (conflictTestProcess?.status === 'running') {
+        return {
+          tone: 'default',
+          message: 'Running conflict resolution tests...',
+        };
+      }
+      if (
+        resolveProcess.status === 'failed' ||
+        conflictTestProcess?.status === 'failed'
+      ) {
+        return {
+          tone: 'destructive',
+          message:
+            'Conflict resolution failed and was rolled back. Check logs or resolve manually.',
+        };
+      }
+      if (repoWithConflicts) {
+        return {
+          tone: 'destructive',
+          message:
+            'Conflict resolution did not complete. Conflicts are still present.',
+        };
+      }
+      return {
+        tone: 'success',
+        message: 'Conflict resolution completed successfully.',
+      };
+    },
+    [
+      resolveProcessId,
+      resolveProcess,
+      conflictTestProcess,
+      repoWithConflicts,
+    ]
+  );
   const { profiles } = useUserSystem();
   const { comments, generateReviewMarkdown, clearComments } = useReview();
   const {
@@ -695,11 +786,11 @@ export function TaskFollowUpSection({
                 attemptBranch={attemptBranch}
                 branchStatus={branchStatus}
                 isEditable={isEditable}
-                onResolve={onSendFollowUp}
-                enableResolve={
-                  canSendFollowUp && !isAttemptRunning && isEditable
-                }
-                enableAbort={canSendFollowUp && !isAttemptRunning}
+                onResolve={() => resolveConflicts(repoWithConflicts?.repo_id)}
+                enableResolve={!isAttemptRunning && isEditable && !isResolving}
+                enableAbort={!isAttemptRunning}
+                resolveStatus={conflictResolutionStatus}
+                resolveError={resolveError}
                 conflictResolutionInstructions={conflictResolutionInstructions}
               />
             )}

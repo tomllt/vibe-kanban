@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                  id as \"id!: Uuid\",\n                  project_id as \"project_id!: Uuid\",\n                  name,\n                  goal,\n                  start_date as \"start_date: DateTime<Utc>\",\n                  end_date as \"end_date: DateTime<Utc>\",\n                  status as \"status!: SprintStatus\",\n                  created_at as \"created_at!: DateTime<Utc>\",\n                  updated_at as \"updated_at!: DateTime<Utc>\"\n               FROM sprints\n               WHERE project_id = $1\n               ORDER BY created_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: Uuid",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "project_id!: Uuid",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "goal",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_date: DateTime<Utc>",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "end_date: DateTime<Utc>",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "status!: SprintStatus",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: DateTime<Utc>",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: DateTime<Utc>",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "10666eee10f7dcb0a5cbf72504a2d6c373a219c732874d673f87732945f6641d"
+}
