@@ -232,6 +232,18 @@ export type InitRepoRequest = { parent_path: string, folder_name: string, };
 
 export type TagSearchParams = { search: string | null, };
 
+export type CreateSprintRequest = { name: string, start_at: string, end_at: string, };
+
+export type UpdateSprintRequest = { name: string | null, start_at: string | null, end_at: string | null, };
+
+export type ReleaseNotesQuery = { download: boolean | null, };
+
+export type ReleaseNotesTaskItem = { task: Task, pull_requests: Array<PullRequestInfo>, commits: Array<string>, };
+
+export type ReleaseNotesStats = { tasks_done: number, pull_requests: number, commits: number, };
+
+export type ReleaseNotesResponse = { sprint: Sprint, markdown: string, stats: ReleaseNotesStats, tasks: Array<ReleaseNotesTaskItem>, };
+
 export type TokenResponse = { access_token: string, expires_at: string | null, };
 
 export type UserSystemInfo = { config: Config, analytics_user_id: string, login_status: LoginStatus, environment: Environment, 

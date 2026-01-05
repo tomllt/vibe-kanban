@@ -31,6 +31,11 @@ export {
   LinkProjectDialog,
   type LinkProjectResult,
 } from './projects/LinkProjectDialog';
+export {
+  SprintReleaseNotesDialog,
+  type SprintReleaseNotesDialogProps,
+  type SprintReleaseNotesDialogResult,
+} from './projects/ReleaseNotesDialog';
 
 // Task-related dialogs
 export {

@@ -23,6 +23,8 @@ pub struct Sprint {
     pub id: Uuid,
     pub project_id: Uuid,
     pub name: String,
+    pub start_at: DateTime<Utc>,
+    pub end_at: DateTime<Utc>,
     pub goal: Option<String>,
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,

@@ -52,6 +52,7 @@ pub struct Task {
     pub shared_task_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub done_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -460,7 +461,8 @@ ORDER BY t.created_at DESC"#,
             data.parent_task_id,
             data.story_points,
             data.parent_workspace_id,
-            data.shared_task_id
+            data.shared_task_id,
+            done_at
         )
         .fetch_one(pool)
         .await
@@ -523,7 +525,15 @@ ORDER BY t.created_at DESC"#,
         status: TaskStatus,
     ) -> Result<(), sqlx::Error> {
         sqlx::query!(
-            "UPDATE tasks SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+            r#"UPDATE tasks
+               SET status = $2,
+                   done_at = CASE
+                     WHEN $2 = 'done' AND done_at IS NULL THEN datetime('now', 'subsec')
+                     WHEN $2 != 'done' THEN NULL
+                     ELSE done_at
+                   END,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = $1"#,
             id,
             status
         )
@@ -539,7 +549,7 @@ ORDER BY t.created_at DESC"#,
         parent_workspace_id: Option<Uuid>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query!(
-            "UPDATE tasks SET parent_workspace_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+            "UPDATE tasks SET parent_workspace_id = $2, updated_at = datetime('now', 'subsec') WHERE id = $1",
             task_id,
             parent_workspace_id
         )
@@ -607,13 +617,51 @@ ORDER BY t.created_at DESC"#,
         E: Executor<'e, Database = Sqlite>,
     {
         sqlx::query!(
-            "UPDATE tasks SET shared_task_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+            "UPDATE tasks SET shared_task_id = $2, updated_at = datetime('now', 'subsec') WHERE id = $1",
             id,
             shared_task_id
         )
         .execute(executor)
         .await?;
         Ok(())
+    }
+
+    /// Returns tasks that are currently `done` and whose completion time falls within the range.
+    ///
+    /// For legacy rows where `done_at` is NULL, falls back to `updated_at`.
+    pub async fn find_done_by_project_and_range(
+        pool: &SqlitePool,
+        project_id: Uuid,
+        start_at: DateTime<Utc>,
+        end_at: DateTime<Utc>,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as!(
+            Task,
+            r#"SELECT id as "id!: Uuid",
+                      project_id as "project_id!: Uuid",
+                      title,
+                      description,
+                      status as "status!: TaskStatus",
+                      parent_workspace_id as "parent_workspace_id: Uuid",
+                      shared_task_id as "shared_task_id: Uuid",
+                      created_at as "created_at!: DateTime<Utc>",
+                      updated_at as "updated_at!: DateTime<Utc>",
+                      done_at as "done_at: DateTime<Utc>"
+               FROM tasks
+               WHERE project_id = $1
+                 AND status = 'done'
+                 AND (
+                   (done_at IS NOT NULL AND done_at >= $2 AND done_at < $3)
+                   OR
+                   (done_at IS NULL AND updated_at >= $2 AND updated_at < $3)
+                 )
+               ORDER BY COALESCE(done_at, updated_at) ASC"#,
+            project_id,
+            start_at,
+            end_at
+        )
+        .fetch_all(pool)
+        .await
     }
 
     pub async fn batch_unlink_shared_tasks<'e, E>(
@@ -628,7 +676,7 @@ ORDER BY t.created_at DESC"#,
         }
 
         let mut query_builder = sqlx::QueryBuilder::new(
-            "UPDATE tasks SET shared_task_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE shared_task_id IN (",
+            "UPDATE tasks SET shared_task_id = NULL, updated_at = datetime('now', 'subsec') WHERE shared_task_id IN (",
         );
 
         let mut separated = query_builder.separated(", ");

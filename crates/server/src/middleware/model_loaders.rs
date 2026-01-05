@@ -1,4 +1,5 @@
 use axum::{
+    Extension,
     extract::{Path, Request, State},
     http::StatusCode,
     middleware::Next,
