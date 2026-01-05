@@ -151,12 +151,17 @@ pub struct UpdateTask {
     pub title: Option<String>,
     pub description: Option<String>,
     pub status: Option<TaskStatus>,
-    pub sprint_id: Option<Uuid>,
+    #[serde(default)]
+    pub sprint_id: Option<Option<Uuid>>,
     pub task_type: Option<TaskType>,
-    pub epic_id: Option<Uuid>,
-    pub parent_task_id: Option<Uuid>,
-    pub story_points: Option<i32>,
-    pub parent_workspace_id: Option<Uuid>,
+    #[serde(default)]
+    pub epic_id: Option<Option<Uuid>>,
+    #[serde(default)]
+    pub parent_task_id: Option<Option<Uuid>>,
+    #[serde(default)]
+    pub story_points: Option<Option<i32>>,
+    #[serde(default)]
+    pub parent_workspace_id: Option<Option<Uuid>>,
     pub image_ids: Option<Vec<Uuid>>,
 }
 

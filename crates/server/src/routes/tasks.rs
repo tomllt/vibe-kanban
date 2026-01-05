@@ -351,16 +351,16 @@ pub async fn update_task(
         None => existing_task.description,      // Field omitted = keep existing
     };
     let status = payload.status.unwrap_or(existing_task.status);
-    let sprint_id = payload.sprint_id.or(existing_task.sprint_id);
+    let sprint_id = payload.sprint_id.unwrap_or(existing_task.sprint_id);
     let task_type = payload
         .task_type
         .unwrap_or_else(|| existing_task.task_type.clone());
-    let epic_id = payload.epic_id.or(existing_task.epic_id);
-    let parent_task_id = payload.parent_task_id.or(existing_task.parent_task_id);
-    let story_points = payload.story_points.or(existing_task.story_points);
+    let epic_id = payload.epic_id.unwrap_or(existing_task.epic_id);
+    let parent_task_id = payload.parent_task_id.unwrap_or(existing_task.parent_task_id);
+    let story_points = payload.story_points.unwrap_or(existing_task.story_points);
     let parent_workspace_id = payload
         .parent_workspace_id
-        .or(existing_task.parent_workspace_id);
+        .unwrap_or(existing_task.parent_workspace_id);
 
     let (sprint_id, epic_id, parent_task_id, story_points) = validate_and_normalize_agile_fields(
         &deployment.db().pool,

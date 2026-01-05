@@ -65,6 +65,12 @@ pub async fn update_sprint(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<UpdateSprint>,
 ) -> Result<ResponseJson<ApiResponse<Sprint>>, ApiError> {
+    if let Some(name) = payload.name.as_ref()
+        && name.trim().is_empty()
+    {
+        return Err(ApiError::BadRequest("Sprint name cannot be empty".to_string()));
+    }
+
     let sprint = Sprint::update(&deployment.db().pool, &existing, &payload).await?;
 
     deployment
@@ -167,6 +173,12 @@ pub async fn assign_to_sprint(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<SprintPlanningTaskIds>,
 ) -> Result<ResponseJson<ApiResponse<SprintPlanningUpdateResponse>>, ApiError> {
+    if payload.task_ids.is_empty() {
+        return Ok(ResponseJson(ApiResponse::success(
+            SprintPlanningUpdateResponse { updated_count: 0 },
+        )));
+    }
+
     ensure_shared_task_auth_for_any(&deployment, &deployment.db().pool, &payload.task_ids).await?;
     validate_no_epics(&deployment.db().pool, &payload.task_ids).await?;
 
@@ -199,6 +211,12 @@ pub async fn unassign_from_sprint(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<SprintPlanningTaskIds>,
 ) -> Result<ResponseJson<ApiResponse<SprintPlanningUpdateResponse>>, ApiError> {
+    if payload.task_ids.is_empty() {
+        return Ok(ResponseJson(ApiResponse::success(
+            SprintPlanningUpdateResponse { updated_count: 0 },
+        )));
+    }
+
     ensure_shared_task_auth_for_any(&deployment, &deployment.db().pool, &payload.task_ids).await?;
 
     let mut query_builder = sqlx::QueryBuilder::new(

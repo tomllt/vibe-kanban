@@ -62,7 +62,7 @@ export type TaskRelationships = { parent_task: Task | null, current_workspace: W
 
 export type CreateTask = { project_id: string, title: string, description: string | null, status: TaskStatus | null, sprint_id: string | null, task_type: TaskType | null, epic_id: string | null, parent_task_id: string | null, story_points: number | null, parent_workspace_id: string | null, image_ids: Array<string> | null, shared_task_id: string | null, };
 
-export type UpdateTask = { title: string | null, description: string | null, status: TaskStatus | null, sprint_id: string | null, task_type: TaskType | null, epic_id: string | null, parent_task_id: string | null, story_points: number | null, parent_workspace_id: string | null, image_ids: Array<string> | null, };
+export type UpdateTask = { title: string | null, description: string | null, status: TaskStatus | null, sprint_id: string | null | null, task_type: TaskType | null, epic_id: string | null | null, parent_task_id: string | null | null, story_points: number | null | null, parent_workspace_id: string | null | null, image_ids: Array<string> | null, };
 
 export type DraftFollowUpData = { message: string, variant: string | null, };
 
