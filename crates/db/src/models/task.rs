@@ -5,7 +5,7 @@ use strum_macros::{Display, EnumString};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use super::{project::Project, workspace::Workspace};
+use super::{environment_promotion::EnvironmentPromotion, project::Project, workspace::Workspace};
 
 #[derive(
     Debug, Clone, Type, Serialize, Deserialize, PartialEq, TS, EnumString, Display, Default,
@@ -62,6 +62,8 @@ pub struct TaskWithAttemptStatus {
     pub has_in_progress_attempt: bool,
     pub last_attempt_failed: bool,
     pub executor: String,
+    #[serde(default)]
+    pub environment_promotions: Option<Vec<EnvironmentPromotion>>,
 }
 
 impl std::ops::Deref for TaskWithAttemptStatus {
@@ -251,7 +253,7 @@ ORDER BY t.created_at DESC"#,
         .fetch_all(pool)
         .await?;
 
-        let tasks = records
+        let mut tasks: Vec<TaskWithAttemptStatus> = records
             .into_iter()
             .map(|rec| TaskWithAttemptStatus {
 	                task: Task {
@@ -273,8 +275,27 @@ ORDER BY t.created_at DESC"#,
                 has_in_progress_attempt: rec.has_in_progress_attempt != 0,
                 last_attempt_failed: rec.last_attempt_failed != 0,
                 executor: rec.executor,
+                environment_promotions: None,
             })
             .collect();
+
+        // Attach latest environment promotion statuses (staging/prod) for each task.
+        let task_ids: Vec<Uuid> = tasks.iter().map(|t| t.id).collect();
+        let promotions = EnvironmentPromotion::latest_by_task_ids(pool, &task_ids).await?;
+
+        if !promotions.is_empty() {
+            let mut by_task: std::collections::HashMap<Uuid, Vec<EnvironmentPromotion>> =
+                std::collections::HashMap::new();
+            for promotion in promotions {
+                by_task.entry(promotion.task_id).or_default().push(promotion);
+            }
+
+            for task in &mut tasks {
+                if let Some(list) = by_task.get(&task.id) {
+                    task.environment_promotions = Some(list.clone());
+                }
+            }
+        }
 
         Ok(tasks)
     }

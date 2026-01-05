@@ -5,6 +5,7 @@ use db::{
     models::{
         execution_process::ExecutionProcess, project::Project, scratch::Scratch, task::Task,
         workspace::Workspace,
+        merge::Merge,
     },
 };
 use serde_json::json;
@@ -21,7 +22,7 @@ mod streams;
 pub mod types;
 
 pub use patches::{
-    execution_process_patch, project_patch, scratch_patch, task_patch, workspace_patch,
+    execution_process_patch, merge_patch, project_patch, scratch_patch, task_patch, workspace_patch,
 };
 pub use types::{EventError, EventPatch, EventPatchInner, HookTables, RecordTypes};
 
@@ -112,6 +113,14 @@ impl EventService {
                                     msg_store_for_preupdate.push_patch(patch);
                                 }
                             }
+                            "merges" => {
+                                if let Ok(value) = preupdate.get_old_column_value(0)
+                                    && let Ok(merge_id) = <Uuid as Decode<Sqlite>>::decode(value)
+                                {
+                                    let patch = merge_patch::remove(merge_id);
+                                    msg_store_for_preupdate.push_patch(patch);
+                                }
+                            }
                             "projects" => {
                                 if let Ok(value) = preupdate.get_old_column_value(0)
                                     && let Ok(project_id) = <Uuid as Decode<Sqlite>>::decode(value)
@@ -168,7 +177,8 @@ impl EventService {
                                 | (HookTables::Projects, SqliteOperation::Delete)
                                 | (HookTables::Workspaces, SqliteOperation::Delete)
                                 | (HookTables::ExecutionProcesses, SqliteOperation::Delete)
-                                | (HookTables::Scratch, SqliteOperation::Delete) => {
+                                | (HookTables::Scratch, SqliteOperation::Delete)
+                                | (HookTables::Merges, SqliteOperation::Delete) => {
                                     // Deletions handled in preupdate hook for reliable data capture
                                     return;
                                 }
@@ -246,6 +256,14 @@ impl EventService {
                                         }
                                     }
                                 }
+                                (HookTables::Merges, _) => match Merge::find_by_rowid(&db.pool, rowid).await {
+                                    Ok(Some(merge)) => RecordTypes::Merge(merge),
+                                    Ok(None) => RecordTypes::DeletedMerge { rowid, merge_id: None },
+                                    Err(e) => {
+                                        tracing::error!("Failed to fetch merge: {:?}", e);
+                                        return;
+                                    }
+                                },
                             };
 
                             let db_op: &str = match hook.operation {
@@ -303,6 +321,15 @@ impl EventService {
                                         SqliteOperation::Insert => scratch_patch::add(scratch),
                                         SqliteOperation::Update => scratch_patch::replace(scratch),
                                         _ => scratch_patch::replace(scratch),
+                                    };
+                                    msg_store_for_hook.push_patch(patch);
+                                    return;
+                                }
+                                RecordTypes::Merge(merge) => {
+                                    let patch = match hook.operation {
+                                        SqliteOperation::Insert => merge_patch::add(merge),
+                                        SqliteOperation::Update => merge_patch::replace(merge),
+                                        _ => merge_patch::replace(merge),
                                     };
                                     msg_store_for_hook.push_patch(patch);
                                     return;

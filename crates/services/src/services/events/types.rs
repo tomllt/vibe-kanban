@@ -1,6 +1,10 @@
 use anyhow::Error as AnyhowError;
 use db::models::{
-    execution_process::ExecutionProcess, project::Project, scratch::Scratch, task::Task,
+    execution_process::ExecutionProcess,
+    merge::Merge,
+    project::Project,
+    scratch::Scratch,
+    task::Task,
     workspace::Workspace,
 };
 use serde::{Deserialize, Serialize};
@@ -32,6 +36,8 @@ pub enum HookTables {
     Scratch,
     #[strum(to_string = "projects")]
     Projects,
+    #[strum(to_string = "merges")]
+    Merges,
 }
 
 #[derive(Serialize, Deserialize, TS)]
@@ -42,6 +48,7 @@ pub enum RecordTypes {
     ExecutionProcess(ExecutionProcess),
     Scratch(Scratch),
     Project(Project),
+    Merge(Merge),
     DeletedTask {
         rowid: i64,
         project_id: Option<Uuid>,
@@ -64,6 +71,10 @@ pub enum RecordTypes {
     DeletedProject {
         rowid: i64,
         project_id: Option<Uuid>,
+    },
+    DeletedMerge {
+        rowid: i64,
+        merge_id: Option<Uuid>,
     },
 }
 

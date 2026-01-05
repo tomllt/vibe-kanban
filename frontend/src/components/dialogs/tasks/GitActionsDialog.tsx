@@ -11,6 +11,7 @@ import GitOperations from '@/components/tasks/Toolbar/GitOperations';
 import { useTaskAttempt } from '@/hooks/useTaskAttempt';
 import { useBranchStatus, useAttemptExecution } from '@/hooks';
 import { useAttemptRepo } from '@/hooks/useAttemptRepo';
+import { useRepoMerges } from '@/hooks/useRepoMerges';
 import { ExecutionProcessesProvider } from '@/contexts/ExecutionProcessesContext';
 import {
   GitOperationsProvider,
@@ -39,13 +40,20 @@ function GitActionsDialogContent({
   const { isAttemptRunning } = useAttemptExecution(attempt.id);
   const { error: gitError } = useGitOperationsError();
   const { repos, selectedRepoId } = useAttemptRepo(attempt.id);
+  const resolvedRepoId = selectedRepoId ?? repos[0]?.id;
+  const { merges: liveMerges, hasSnapshot: hasLiveMergesSnapshot } = useRepoMerges(
+    attempt.id,
+    resolvedRepoId
+  );
 
   const getSelectedRepoStatus = () => {
-    const repoId = selectedRepoId ?? repos[0]?.id;
-    return branchStatus?.find((r) => r.repo_id === repoId);
+    return branchStatus?.find((r) => r.repo_id === resolvedRepoId);
   };
 
-  const mergedPR = getSelectedRepoStatus()?.merges?.find(
+  const merges = hasLiveMergesSnapshot
+    ? liveMerges
+    : getSelectedRepoStatus()?.merges ?? [];
+  const mergedPR = merges.find(
     (m: Merge) => m.type === 'pr' && m.pr_info?.status === 'merged'
   );
 

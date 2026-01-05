@@ -7,6 +7,7 @@ import { ProjectTasks } from '@/pages/ProjectTasks';
 import { ProjectBacklog } from '@/pages/ProjectBacklog';
 import { ProjectSprintPlanning } from '@/pages/ProjectSprintPlanning';
 import { FullAttemptLogsPage } from '@/pages/FullAttemptLogs';
+import { AnalyticsDashboard } from '@/pages/AnalyticsDashboard';
 import { NormalLayout } from '@/components/layout/NormalLayout';
 import { usePostHog } from 'posthog-js/react';
 import { useAuth } from '@/hooks';

@@ -13,6 +13,7 @@
     "share": "タスクを共有",
     "reassign": "再割り当て",
     "stopShare": "共有を停止",
+    "groomStory": "Groom story",
     "duplicate": "Duplicate",
     "editBranchName": "ブランチ名を編集",
     "gitActions": "Gitアクション",
@@ -20,6 +21,27 @@
     "task": "Task",
     "viewProcesses": "View processes",
     "viewRelatedTasks": "View related tasks"
+  },
+  "backlogGroomer": {
+    "title": "Backlog groomer",
+    "description": "Generate acceptance criteria, subtasks, and a story point estimate.",
+    "generate": "Generate draft",
+    "generating": "Generating...",
+    "regenerate": "Regenerate",
+    "apply": "Apply to task",
+    "applying": "Applying...",
+    "errorGeneric": "Backlog grooming failed. Please try again.",
+    "emptyTitle": "No draft yet",
+    "emptyBody": "Generate a draft from the story title. You can edit before applying.",
+    "generatedHint": "Review, edit, then apply.",
+    "storyPoints": "Story points",
+    "acceptanceCriteria": "Acceptance criteria",
+    "subtasks": "Subtasks",
+    "subtasksHint": "Keep 3–5 items for best results.",
+    "add": "Add",
+    "remove": "Remove",
+    "itemPlaceholder": "Write a concise item…",
+    "validationSubtasks": "Please keep 3–5 subtasks before applying."
   },
   "editBranchName": {
     "dialog": {
@@ -176,6 +198,9 @@
   },
   "createAttemptDialog": {
     "baseBranch": "Base branch",
+    "branchKind": "Branch type",
+    "branchKindFeature": "Feature",
+    "branchKindHotfix": "Hotfix",
     "creating": "Creating...",
     "description": "Start a new attempt with a coding agent. A git worktree and task branch will be created.",
     "error": "Failed to create attempt. Please try again.",

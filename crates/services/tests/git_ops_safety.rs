@@ -5,7 +5,7 @@ use std::{
 };
 
 use git2::{PushOptions, Repository, build::CheckoutBuilder};
-use services::services::git::{GitCli, GitCliError, GitService};
+use services::services::git::{GitCli, GitCliError, GitService, GitServiceError};
 use tempfile::TempDir;
 // Avoid direct git CLI usage in tests; exercise GitService instead.
 
@@ -404,6 +404,140 @@ fn push_and_fetch_roundtrip_updates_tracking_branch() {
         updated_oid, new_oid,
         "tracking branch advanced to remote head"
     );
+}
+
+#[test]
+fn sync_local_branch_fast_forwards_from_remote() {
+    let temp_dir = TempDir::new().unwrap();
+    let remote_path = temp_dir.path().join("remote.git");
+    Repository::init_bare(&remote_path).expect("init bare remote");
+    let remote_url = remote_path.to_str().expect("remote path str");
+
+    let seed_path = temp_dir.path().join("seed");
+    let service = GitService::new();
+    service
+        .initialize_repo_with_main_branch(&seed_path)
+        .expect("init seed repo");
+    let seed_repo = Repository::open(&seed_path).expect("open seed repo");
+    configure_user(&seed_repo);
+    seed_repo.remote("origin", remote_url).expect("add remote");
+
+    push_ref(&seed_repo, "refs/heads/main", "refs/heads/main");
+    create_branch_from_head(&seed_repo, "staging");
+    push_ref(&seed_repo, "refs/heads/staging", "refs/heads/staging");
+
+    Repository::open_bare(&remote_path)
+        .expect("open bare remote")
+        .set_head("refs/heads/main")
+        .expect("set remote HEAD");
+
+    let producer_path = temp_dir.path().join("producer");
+    let producer_repo = Repository::clone(remote_url, &producer_path).expect("clone producer");
+    configure_user(&producer_repo);
+
+    let consumer_path = temp_dir.path().join("consumer");
+    let consumer_repo = Repository::clone(remote_url, &consumer_path).expect("clone consumer");
+    configure_user(&consumer_repo);
+
+    // Producer advances staging remotely.
+    service
+        .ensure_local_branch_exists(&producer_path, "staging")
+        .expect("ensure staging exists");
+    checkout_branch(&producer_repo, "staging");
+    write_file(&producer_path, "file.txt", "producer change\n");
+    commit_all(&producer_repo, "producer staging commit");
+
+    let remote = producer_repo.find_remote("origin").expect("origin remote");
+    let remote_url_string = remote.url().expect("origin url").to_string();
+    let git_cli = GitCli::new();
+    git_cli
+        .push(&producer_path, &remote_url_string, "staging", false)
+        .expect("push succeeded");
+
+    // Consumer creates local staging, then syncs it.
+    service
+        .ensure_local_branch_exists(&consumer_path, "staging")
+        .expect("ensure staging exists");
+    service
+        .sync_local_branch_with_default_remote(&consumer_path, "staging")
+        .expect("sync succeeded");
+
+    let local_oid = consumer_repo
+        .find_reference("refs/heads/staging")
+        .expect("local staging")
+        .target()
+        .expect("local staging target");
+    let remote_oid = consumer_repo
+        .find_reference("refs/remotes/origin/staging")
+        .expect("remote staging")
+        .target()
+        .expect("remote staging target");
+    assert_eq!(local_oid, remote_oid, "local staging fast-forwarded");
+}
+
+#[test]
+fn sync_local_branch_diverged_errors() {
+    let temp_dir = TempDir::new().unwrap();
+    let remote_path = temp_dir.path().join("remote.git");
+    Repository::init_bare(&remote_path).expect("init bare remote");
+    let remote_url = remote_path.to_str().expect("remote path str");
+
+    let seed_path = temp_dir.path().join("seed");
+    let service = GitService::new();
+    service
+        .initialize_repo_with_main_branch(&seed_path)
+        .expect("init seed repo");
+    let seed_repo = Repository::open(&seed_path).expect("open seed repo");
+    configure_user(&seed_repo);
+    seed_repo.remote("origin", remote_url).expect("add remote");
+
+    push_ref(&seed_repo, "refs/heads/main", "refs/heads/main");
+    create_branch_from_head(&seed_repo, "staging");
+    push_ref(&seed_repo, "refs/heads/staging", "refs/heads/staging");
+
+    Repository::open_bare(&remote_path)
+        .expect("open bare remote")
+        .set_head("refs/heads/main")
+        .expect("set remote HEAD");
+
+    let producer_path = temp_dir.path().join("producer");
+    let producer_repo = Repository::clone(remote_url, &producer_path).expect("clone producer");
+    configure_user(&producer_repo);
+
+    let consumer_path = temp_dir.path().join("consumer");
+    let consumer_repo = Repository::clone(remote_url, &consumer_path).expect("clone consumer");
+    configure_user(&consumer_repo);
+
+    service
+        .ensure_local_branch_exists(&producer_path, "staging")
+        .expect("ensure staging exists");
+    service
+        .ensure_local_branch_exists(&consumer_path, "staging")
+        .expect("ensure staging exists");
+
+    // Consumer makes a local-only commit on staging.
+    checkout_branch(&consumer_repo, "staging");
+    write_file(&consumer_path, "local.txt", "consumer local commit\n");
+    commit_all(&consumer_repo, "consumer local staging commit");
+
+    // Producer advances staging remotely.
+    checkout_branch(&producer_repo, "staging");
+    write_file(&producer_path, "remote.txt", "producer remote commit\n");
+    commit_all(&producer_repo, "producer remote staging commit");
+
+    let remote = producer_repo.find_remote("origin").expect("origin remote");
+    let remote_url_string = remote.url().expect("origin url").to_string();
+    let git_cli = GitCli::new();
+    git_cli
+        .push(&producer_path, &remote_url_string, "staging", false)
+        .expect("push succeeded");
+
+    let result = service.sync_local_branch_with_default_remote(&consumer_path, "staging");
+    match result {
+        Err(GitServiceError::BranchesDiverged(_)) => {}
+        Err(other) => panic!("expected BranchesDiverged, got {other:?}"),
+        Ok(()) => panic!("sync unexpectedly succeeded"),
+    }
 }
 
 #[test]

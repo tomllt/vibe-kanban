@@ -74,6 +74,15 @@
           "ask_for_approval": "unless-trusted"
         }
       },
+      "BACKLOG_GROOMER": {
+        "CODEX": {
+          "model": "gpt-5.2",
+          "sandbox": "read-only",
+          "ask_for_approval": "never",
+          "include_apply_patch_tool": false,
+          "base_instructions": "You are a backlog grooming assistant. Never use tools. Output only the requested JSON."
+        }
+      },
       "MAX": {
         "CODEX": {
           "model": "gpt-5.1-codex-max",

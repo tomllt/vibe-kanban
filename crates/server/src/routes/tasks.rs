@@ -13,6 +13,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use db::models::{
+    environment_promotion::{EnvironmentPromotion, PromotionStatus, WorkflowEnvironment},
     image::TaskImage,
     project::{Project, ProjectError},
     repo::Repo,
@@ -22,11 +23,15 @@ use db::models::{
     workspace_repo::{CreateWorkspaceRepo, WorkspaceRepo},
 };
 use deployment::Deployment;
+use executors::backlog_groomer::{BacklogGroomer, BacklogGroomerError, BacklogGroomingDraft};
 use executors::profile::ExecutorProfileId;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use services::services::{
-    container::ContainerService, share::ShareError, workspace_manager::WorkspaceManager,
+    container::ContainerService,
+    git::GitBranchKind,
+    share::ShareError,
+    workspace_manager::WorkspaceManager,
 };
 use sqlx::Error as SqlxError;
 use ts_rs::TS;
@@ -210,6 +215,9 @@ pub struct CreateAndStartTaskRequest {
     pub task: CreateTask,
     pub executor_profile_id: ExecutorProfileId,
     pub repos: Vec<WorkspaceRepoInput>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub branch_kind: Option<GitBranchKind>,
 }
 
 pub async fn create_task_and_start(
@@ -273,9 +281,10 @@ pub async fn create_task_and_start(
         .ok_or(ProjectError::ProjectNotFound)?;
 
     let attempt_id = Uuid::new_v4();
+    let branch_kind = payload.branch_kind.unwrap_or(GitBranchKind::Feature);
     let git_branch_name = deployment
         .container()
-        .git_branch_from_workspace(&attempt_id, &task.title)
+        .git_branch_from_workspace_with_kind(&attempt_id, &task.title, branch_kind)
         .await;
 
     let agent_working_dir = project
@@ -343,6 +352,8 @@ pub async fn update_task(
 ) -> Result<ResponseJson<ApiResponse<Task>>, ApiError> {
     ensure_shared_task_auth(&existing_task, &deployment).await?;
 
+    let old_status = existing_task.status.clone();
+
     // Use existing values if not provided in update
     let title = payload.title.unwrap_or(existing_task.title);
     let description = match payload.description {
@@ -372,6 +383,31 @@ pub async fn update_task(
         story_points,
     )
     .await?;
+
+    // If moving into Staging/Prod, optionally run workflow promotion first.
+    if old_status != status {
+        let workflow = deployment.config().read().await.workflow_automation.clone();
+        if workflow.enabled {
+            let env = match status {
+                db::models::task::TaskStatus::InReview => Some(WorkflowEnvironment::Staging),
+                db::models::task::TaskStatus::Done => Some(WorkflowEnvironment::Prod),
+                _ => None,
+            };
+
+            if let Some(environment) = env {
+                promote_task_to_environment(
+                    &deployment,
+                    existing_task.id,
+                    &title,
+                    description.as_deref(),
+                    old_status.clone(),
+                    environment,
+                    workflow,
+                )
+                .await?;
+            }
+        }
+    }
 
     let task = Task::update(
         &deployment.db().pool,
@@ -712,7 +748,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
     let task_actions_router = Router::new()
         .route("/", put(update_task))
         .route("/", delete(delete_task))
-        .route("/share", post(share_task));
+        .route("/share", post(share_task))
+        .route("/backlog-grooming", get(get_backlog_grooming_draft))
+        .route("/backlog-grooming/generate", post(generate_backlog_grooming))
+        .route("/backlog-grooming/apply", post(apply_backlog_grooming));
 
     let task_id_router = Router::new()
         .route("/", get(get_task))

@@ -3,6 +3,7 @@ import { KanbanCard } from '@/components/ui/shadcn-io/kanban';
 import { Link, Loader2, XCircle } from 'lucide-react';
 import type { TaskType, TaskWithAttemptStatus } from 'shared/types';
 import { ActionsDropdown } from '@/components/ui/actions-dropdown';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useNavigateWithSearch } from '@/hooks';
@@ -51,6 +52,32 @@ export function TaskCard({
   const navigate = useNavigateWithSearch();
   const [isNavigatingToParent, setIsNavigatingToParent] = useState(false);
   const { isSignedIn } = useAuth();
+
+  const stagingPromotion = task.environment_promotions?.find(
+    (p) => p.environment === 'staging'
+  );
+  const prodPromotion = task.environment_promotions?.find(
+    (p) => p.environment === 'prod'
+  );
+
+  const promotionBadgeClass = (status: string) => {
+    switch (status) {
+      case 'succeeded':
+        return 'border-transparent bg-emerald-600 text-white';
+      case 'failed':
+        return 'border-transparent bg-destructive text-destructive-foreground';
+      case 'pending':
+        return 'border-transparent bg-amber-500 text-black';
+      default:
+        return 'border-transparent bg-muted text-muted-foreground';
+    }
+  };
+
+  const promotionTitle = (envLabel: string, promotion?: typeof stagingPromotion) => {
+    if (!promotion) return '';
+    const base = `${envLabel}: ${promotion.status} → ${promotion.target_branch}`;
+    return promotion.message ? `${base}\n${promotion.message}` : base;
+  };
 
   const handleClick = useCallback(() => {
     onViewDetails(task);

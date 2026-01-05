@@ -1,10 +1,10 @@
 import { TaskStatus } from 'shared/types';
 
 export const statusLabels: Record<TaskStatus, string> = {
-  todo: 'To Do',
-  inprogress: 'In Progress',
-  inreview: 'In Review',
-  done: 'Done',
+  todo: 'Local',
+  inprogress: 'Feature',
+  inreview: 'Staging',
+  done: 'Prod',
   cancelled: 'Cancelled',
 };
 

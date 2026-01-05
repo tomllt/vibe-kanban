@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(DISTINCT t.id) as \"count!: i64\"\n           FROM execution_processes ep\n           JOIN sessions s ON s.id = ep.session_id\n           JOIN workspaces w ON w.id = s.workspace_id\n           JOIN tasks t ON t.id = w.task_id\n          WHERE t.project_id = $1\n            AND ep.run_reason = 'codingagent'\n            AND ep.created_at >= $2\n            AND ep.created_at <= $3",
+  "describe": {
+    "columns": [
+      {
+        "name": "count!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e6379ba0eddb5b1cf03b91a8c8e9e7f03123885e25f8f623f6f0ada30a4bc39a"
+}
