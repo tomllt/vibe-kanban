@@ -439,7 +439,7 @@ export const sprintsApi = {
     sprintId: string
   ): Promise<Blob> => {
     const response = await fetch(
-      `/api/projects/${projectId}/sprints/${sprintId}/release-notes?download=1`,
+      `/api/projects/${projectId}/sprints/${sprintId}/release-notes?download=true`,
       { headers: { Accept: 'text/markdown' } }
     );
 

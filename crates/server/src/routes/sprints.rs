@@ -148,8 +148,7 @@ pub async fn get_release_notes(
 
         let mut merges = Vec::new();
         for ws in workspaces {
-            let mut ws_merges = db::models::merge::Merge::find_by_workspace_id(pool, ws.id).await?;
-            ws_merges.retain(|m| merge_created_at_in_range(m, sprint.start_at, sprint.end_at));
+            let ws_merges = db::models::merge::Merge::find_by_workspace_id(pool, ws.id).await?;
             merges.extend(ws_merges);
         }
 
@@ -180,18 +179,6 @@ pub async fn get_release_notes(
 
     let body: ApiResponse<crate::release_notes::ReleaseNotesResponse> = ApiResponse::success(response);
     Ok(ResponseJson(body).into_response())
-}
-
-fn merge_created_at_in_range(
-    merge: &db::models::merge::Merge,
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-) -> bool {
-    let created_at = match merge {
-        db::models::merge::Merge::Direct(m) => m.created_at,
-        db::models::merge::Merge::Pr(m) => m.created_at,
-    };
-    created_at >= start && created_at < end
 }
 
 fn slug_filename(name: &str) -> String {

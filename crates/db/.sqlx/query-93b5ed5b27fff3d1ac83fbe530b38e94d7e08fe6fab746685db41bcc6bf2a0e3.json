@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "UPDATE tasks\n               SET title = $3, description = $4, status = $5, parent_workspace_id = $6\n               WHERE id = $1 AND project_id = $2\n               RETURNING id as \"id!: Uuid\", project_id as \"project_id!: Uuid\", title, description, status as \"status!: TaskStatus\", parent_workspace_id as \"parent_workspace_id: Uuid\", shared_task_id as \"shared_task_id: Uuid\", created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\"",
+  "query": "UPDATE tasks\n               SET title = $3,\n                   description = $4,\n                   status = $5,\n                   parent_workspace_id = $6,\n                   done_at = CASE\n                     WHEN $5 = 'done' AND done_at IS NULL THEN datetime('now', 'subsec')\n                     WHEN $5 != 'done' THEN NULL\n                     ELSE done_at\n                   END,\n                   updated_at = datetime('now', 'subsec')\n               WHERE id = $1 AND project_id = $2\n               RETURNING id as \"id!: Uuid\", project_id as \"project_id!: Uuid\", title, description, status as \"status!: TaskStatus\", parent_workspace_id as \"parent_workspace_id: Uuid\", shared_task_id as \"shared_task_id: Uuid\", created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\", done_at as \"done_at: DateTime<Utc>\"",
   "describe": {
     "columns": [
       {
@@ -47,6 +47,11 @@
         "name": "updated_at!: DateTime<Utc>",
         "ordinal": 8,
         "type_info": "Text"
+      },
+      {
+        "name": "done_at: DateTime<Utc>",
+        "ordinal": 9,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -61,8 +66,9 @@
       true,
       true,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "a19c2df7514df39aeb8bbf7b846e486f439bc3464f68ae0b7ce6e011542fa6c5"
+  "hash": "93b5ed5b27fff3d1ac83fbe530b38e94d7e08fe6fab746685db41bcc6bf2a0e3"
 }

@@ -4,6 +4,7 @@ use db::models::{
     sprint::Sprint,
     task::Task,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -30,23 +31,25 @@ pub struct ReleaseNotesResponse {
 }
 
 pub fn build_task_item(task: Task, merges: Vec<Merge>) -> ReleaseNotesTaskItem {
-    let mut pull_requests: Vec<PullRequestInfo> = merges
-        .iter()
-        .filter_map(|m| match m {
-            Merge::Pr(pr) => Some(pr.pr_info.clone()),
-            _ => None,
-        })
-        .collect();
+    let mut prs_by_url: BTreeMap<String, PullRequestInfo> = BTreeMap::new();
+    let mut commits_set: BTreeSet<String> = BTreeSet::new();
 
-    pull_requests.sort_by(|a, b| a.url.cmp(&b.url));
-    pull_requests.dedup_by(|a, b| a.url == b.url);
+    for merge in merges {
+        if let Some(commit) = merge.merge_commit().map(|s| s.trim().to_string()) {
+            if !commit.is_empty() {
+                commits_set.insert(commit);
+            }
+        }
 
-    let mut commits: Vec<String> = merges
-        .into_iter()
-        .filter_map(|m| m.merge_commit())
-        .collect();
-    commits.sort();
-    commits.dedup();
+        if let Merge::Pr(pr) = merge {
+            prs_by_url
+                .entry(pr.pr_info.url.clone())
+                .or_insert(pr.pr_info);
+        }
+    }
+
+    let pull_requests: Vec<PullRequestInfo> = prs_by_url.into_values().collect();
+    let commits: Vec<String> = commits_set.into_iter().collect();
 
     ReleaseNotesTaskItem {
         task,
@@ -223,6 +226,49 @@ mod tests {
     }
 
     #[test]
+    fn build_task_item_dedups_prs_and_commits() {
+        let task = task("A");
+        let merges = vec![
+            Merge::Pr(db::models::merge::PrMerge {
+                id: Uuid::new_v4(),
+                workspace_id: Uuid::new_v4(),
+                repo_id: Uuid::new_v4(),
+                created_at: Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap(),
+                target_branch_name: "main".to_string(),
+                pr_info: pr(1, "https://example.com/pull/1"),
+            }),
+            Merge::Pr(db::models::merge::PrMerge {
+                id: Uuid::new_v4(),
+                workspace_id: Uuid::new_v4(),
+                repo_id: Uuid::new_v4(),
+                created_at: Utc.with_ymd_and_hms(2026, 1, 4, 0, 0, 0).unwrap(),
+                target_branch_name: "main".to_string(),
+                pr_info: pr(1, "https://example.com/pull/1"),
+            }),
+            Merge::Direct(db::models::merge::DirectMerge {
+                id: Uuid::new_v4(),
+                workspace_id: Uuid::new_v4(),
+                repo_id: Uuid::new_v4(),
+                created_at: Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap(),
+                target_branch_name: "main".to_string(),
+                merge_commit: "aaaaaaaaaaaa".to_string(),
+            }),
+            Merge::Direct(db::models::merge::DirectMerge {
+                id: Uuid::new_v4(),
+                workspace_id: Uuid::new_v4(),
+                repo_id: Uuid::new_v4(),
+                created_at: Utc.with_ymd_and_hms(2026, 1, 6, 0, 0, 0).unwrap(),
+                target_branch_name: "main".to_string(),
+                merge_commit: "aaaaaaaaaaaa".to_string(),
+            }),
+        ];
+
+        let item = build_task_item(task, merges);
+        assert_eq!(item.pull_requests.len(), 1, "{:?}", item.pull_requests);
+        assert_eq!(item.commits.len(), 2, "{:?}", item.commits);
+    }
+
+    #[test]
     fn markdown_contains_sections_and_counts() {
         let sprint = sprint();
         let items = vec![
@@ -262,4 +308,3 @@ mod tests {
         assert_eq!(short_sha("abcdefg"), "abcdefg");
     }
 }
-
