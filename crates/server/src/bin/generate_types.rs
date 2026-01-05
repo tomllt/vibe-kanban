@@ -186,6 +186,7 @@ fn generate_types_content() -> String {
         executors::executors::droid::Autonomy::decl(),
         executors::executors::droid::ReasoningEffortLevel::decl(),
         executors::executors::AppendPrompt::decl(),
+        executors::backlog_groomer::BacklogGroomingDraft::decl(),
         executors::actions::coding_agent_initial::CodingAgentInitialRequest::decl(),
         executors::actions::coding_agent_follow_up::CodingAgentFollowUpRequest::decl(),
         executors::logs::CommandExitStatus::decl(),
@@ -201,6 +202,9 @@ fn generate_types_content() -> String {
         executors::logs::ToolStatus::decl(),
         executors::logs::utils::patch::PatchType::decl(),
         serde_json::Value::decl(),
+        server::routes::tasks::BacklogGroomerGenerateRequest::decl(),
+        server::routes::tasks::BacklogGroomerApplyRequest::decl(),
+        server::routes::tasks::BacklogGroomerDraftResponse::decl(),
     ];
 
     let body = decls
