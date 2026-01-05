@@ -1,5 +1,6 @@
 use db::models::{
     execution_process::ExecutionProcess,
+    merge::Merge,
     project::Project,
     scratch::Scratch,
     session::Session,
@@ -7,7 +8,9 @@ use db::models::{
 };
 use futures::StreamExt;
 use serde_json::json;
+use std::{collections::HashSet, sync::Arc};
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
+use tokio::sync::Mutex;
 use utils::log_msg::LogMsg;
 use uuid::Uuid;
 
@@ -145,6 +148,137 @@ impl EventService {
         let combined_stream = initial_stream.chain(filtered_stream).boxed();
 
         Ok(combined_stream)
+    }
+
+    /// Stream merge messages for a workspace + repo with initial snapshot
+    pub async fn stream_merges_raw(
+        &self,
+        workspace_id: Uuid,
+        repo_id: Uuid,
+    ) -> Result<futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>, EventError>
+    {
+        fn merge_id(merge: &Merge) -> Uuid {
+            match merge {
+                Merge::Direct(d) => d.id,
+                Merge::Pr(p) => p.id,
+            }
+        }
+
+        fn build_merges_snapshot(merges: Vec<Merge>) -> (LogMsg, HashSet<Uuid>) {
+            let mut ids = HashSet::new();
+            let merges_map: serde_json::Map<String, serde_json::Value> = merges
+                .into_iter()
+                .map(|merge| {
+                    let id = merge_id(&merge);
+                    ids.insert(id);
+                    (id.to_string(), serde_json::to_value(merge).unwrap())
+                })
+                .collect();
+
+            let patch = json!([
+                {
+                    "op": "replace",
+                    "path": "/merges",
+                    "value": merges_map
+                }
+            ]);
+            let msg = LogMsg::JsonPatch(serde_json::from_value(patch).unwrap());
+            (msg, ids)
+        }
+
+        let merges = Merge::find_by_workspace_and_repo_id(&self.db.pool, workspace_id, repo_id)
+            .await?;
+        let (initial_msg, initial_ids) = build_merges_snapshot(merges);
+        let tracked_ids = Arc::new(Mutex::new(initial_ids));
+
+        let db_pool = self.db.pool.clone();
+        let tracked_ids_for_stream = tracked_ids.clone();
+
+        let filtered_stream =
+            BroadcastStream::new(self.msg_store.get_receiver()).filter_map(move |msg_result| {
+                let db_pool = db_pool.clone();
+                let tracked_ids = tracked_ids_for_stream.clone();
+                async move {
+                    match msg_result {
+                        Ok(LogMsg::JsonPatch(patch)) => {
+                            let Some(patch_op) = patch.0.first() else {
+                                return None;
+                            };
+
+                            if !patch_op.path().starts_with("/merges/") {
+                                return None;
+                            }
+
+                            match patch_op {
+                                json_patch::PatchOperation::Add(op) => {
+                                    if let Ok(merge) =
+                                        serde_json::from_value::<Merge>(op.value.clone())
+                                        && merge_matches(&merge, workspace_id, repo_id)
+                                    {
+                                        let mut ids = tracked_ids.lock().await;
+                                        ids.insert(merge_id(&merge));
+                                        return Some(Ok(LogMsg::JsonPatch(patch)));
+                                    }
+                                }
+                                json_patch::PatchOperation::Replace(op) => {
+                                    if let Ok(merge) =
+                                        serde_json::from_value::<Merge>(op.value.clone())
+                                        && merge_matches(&merge, workspace_id, repo_id)
+                                    {
+                                        let mut ids = tracked_ids.lock().await;
+                                        ids.insert(merge_id(&merge));
+                                        return Some(Ok(LogMsg::JsonPatch(patch)));
+                                    }
+                                }
+                                json_patch::PatchOperation::Remove(op) => {
+                                    let Some(id) = parse_merge_id(op.path.as_str()) else {
+                                        return None;
+                                    };
+                                    let mut ids = tracked_ids.lock().await;
+                                    if ids.remove(&id) {
+                                        return Some(Ok(LogMsg::JsonPatch(patch)));
+                                    }
+                                }
+                                _ => {}
+                            }
+
+                            None
+                        }
+                        Ok(other) => Some(Ok(other)),
+                        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                            tracing::warn!(
+                                skipped = skipped,
+                                workspace_id = %workspace_id,
+                                repo_id = %repo_id,
+                                "merges stream lagged; resyncing snapshot"
+                            );
+
+                            match Merge::find_by_workspace_and_repo_id(&db_pool, workspace_id, repo_id)
+                                .await
+                            {
+                                Ok(merges) => {
+                                    let (msg, ids) = build_merges_snapshot(merges);
+                                    let mut tracked = tracked_ids.lock().await;
+                                    *tracked = ids;
+                                    Some(Ok(msg))
+                                }
+                                Err(err) => {
+                                    tracing::error!(
+                                        error = %err,
+                                        "failed to resync merges after lag"
+                                    );
+                                    Some(Err(std::io::Error::other(format!(
+                                        "failed to resync merges after lag: {err}"
+                                    ))))
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+        let initial_stream = futures::stream::once(async move { Ok(initial_msg) });
+        Ok(initial_stream.chain(filtered_stream).boxed())
     }
 
     /// Stream raw project messages with initial snapshot
@@ -445,4 +579,17 @@ impl EventService {
         let combined_stream = initial_stream.chain(filtered_stream).boxed();
         Ok(combined_stream)
     }
+}
+
+fn merge_matches(merge: &Merge, workspace_id: Uuid, repo_id: Uuid) -> bool {
+    match merge {
+        Merge::Direct(d) => d.workspace_id == workspace_id && d.repo_id == repo_id,
+        Merge::Pr(p) => p.workspace_id == workspace_id && p.repo_id == repo_id,
+    }
+}
+
+fn parse_merge_id(path: &str) -> Option<Uuid> {
+    // Expected: /merges/<uuid>
+    let id_str = path.strip_prefix("/merges/")?;
+    Uuid::parse_str(id_str).ok()
 }

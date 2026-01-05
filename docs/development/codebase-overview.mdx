@@ -1,0 +1,203 @@
+---
+title: "项目代码结构与架构分析（开发者向）"
+description: "面向开发者的 Vibe Kanban 代码库分析：架构、核心功能、开发流程与部署方式。"
+---
+
+本页面向需要阅读/维护代码的开发者，基于仓库当前实现整理（Rust workspace + React/Vite + SQLite + 可选远端服务）。
+
+## 一句话概览
+
+Vibe Kanban 是一个本地优先的 Web 应用：Rust（Axum）后端同时提供 API 与静态前端资源；每个任务在独立的 git worktree 中运行一个“执行流程（execution process）”，通过 WebSocket/SSE 将日志、Diff、结构化事件流实时推送到前端；可选连接 `crates/remote` 提供的托管服务以支持组织/共享任务、Electric 同步、Review 上传等能力。
+
+## 仓库结构（按职责）
+
+- `crates/server`：本地后端（Axum 路由、前端静态资源托管、MCP server 适配、类型生成器）。
+- `crates/db`：本地 SQLite（SQLx）数据层，包含 migrations 与 models。
+- `crates/services`：业务服务层（git/worktree 管理、执行流程编排、事件流、文件搜索、远端客户端等）。
+- `crates/executors`：对不同编码 Agent/CLI 的“执行器”适配（Claude Code、Codex、Gemini、Cursor、Copilot、Amp、Opencode、Qwen 等），包含日志标准化、配置 profile、MCP 配置读写。
+- `crates/local-deployment`：本地部署实现（实现 `deployment::Deployment`，组装 DB/Services/Executors/RemoteClient 等）。
+- `crates/remote`：托管端 API（Postgres + Electric + OAuth + Review + 静态 `remote-frontend`）。
+- `crates/review`：Review CLI（上传 PR/会话归档，驱动远端 review 流程）。
+- `frontend`：本地 UI（React + TypeScript + Vite + Tailwind）。
+- `remote-frontend`：托管端 UI（被 `crates/remote/Dockerfile` 构建并作为静态站点由远端服务提供）。
+- `shared/types.ts`：由 Rust 通过 `ts-rs` 生成的 TypeScript 类型文件（不要手改）。
+- `npx-cli`：发布到 npm 的 CLI 包装器，负责下载/缓存预编译二进制并启动。
+- `scripts`：开发辅助脚本（端口分配、准备 SQLx 离线查询等）。
+
+## 核心运行时架构（本地）
+
+### 1) 进程与端口
+
+- 本地后端二进制：`server`（入口：`crates/server/src/main.rs`）。
+- 默认行为：监听 `HOST`（默认 `127.0.0.1`）与 `PORT`/`BACKEND_PORT`（不设则 0 自动分配），并把最终端口写入临时端口文件（用于 MCP server 发现）。
+- 前端资源：
+  - 生产/发布：后端通过 `rust-embed` 直接托管 `frontend/dist`（`crates/server/src/routes/frontend.rs`）。
+  - 开发：Vite dev server 运行在 `FRONTEND_PORT`，并将 `/api/*` 代理到后端（见 `frontend/vite.config.ts`）。
+
+### 2) API 形态：HTTP + SSE + WebSocket（JSON Patch）
+
+后端路由统一挂载在 `/api` 下（`crates/server/src/routes/mod.rs`），并提供：
+
+- **HTTP JSON**：标准 CRUD（项目、任务、标签、配置、Repo 注册、组织等）。
+- **SSE**：`/api/events` 提供事件流（`crates/server/src/routes/events.rs`）。
+- **WebSocket**：大量“流式”端点（例如 `/api/tasks/stream/ws`、`/api/task-attempts/:id/diff/ws`、`/api/execution-processes/:id/*-logs/ws`），通常以 JSON Patch 的形式推送“快照 + 增量”。
+
+前端在 `frontend/src/hooks/useJsonPatchWsStream.ts`（以及上层 hooks，如 `useProjectTasks`, `useLogStream`, `useDiffStream`）中统一消费这些流。
+
+## 数据与领域模型（本地 SQLite）
+
+### DB 存储位置与迁移
+
+- DB 文件：`dev` 模式落在仓库 `dev_assets/db.sqlite`；发布模式落在系统应用数据目录（见 `crates/utils/src/assets.rs` 与 `crates/db/src/lib.rs`）。
+- migrations：`crates/db/migrations/*`，启动时自动 `sqlx::migrate!` 执行。
+
+### 关键实体（概念层）
+
+从代码与类型生成器（`crates/server/src/bin/generate_types.rs`）可以看到本地核心实体包括：
+
+- `Project` / `Repo` / `ProjectRepo`：项目与其包含的仓库集合。
+- `Task`：看板任务（`todo/inprogress/inreview/done/cancelled`）。
+- `Workspace`：一次任务执行的隔离工作空间（核心是 git worktree/branch/工作目录等）。
+- `Session`：一次执行会话（与具体 executor/profile 绑定）。
+- `ExecutionProcess`：实际运行的进程/步骤（setup script、dev server、coding agent initial/follow-up 等）。
+- `ExecutionProcessLogs` / `ExecutionProcessRepoState`：日志与每个 repo 的 head 状态（用于 diff、回滚与状态判断）。
+- `Image` / `TaskImage`：任务/对话关联的图片与元数据。
+- `Scratch`：草稿/临时内容（用于 follow-up、提示词、编辑器内交互等）。
+
+## “任务执行”在代码里的落点
+
+### 执行编排：ContainerService
+
+`crates/services/src/services/container.rs` 定义 `ContainerService`，用于：
+
+- 为 workspace 创建/删除隔离环境（worktree、拷贝 repo、切分 working dir）。
+- 启动执行流程（setup script、启动 agent、follow-up 等）。
+- 维护执行进程状态，收集标准化日志并更新 DB。
+- 在满足条件时将任务状态推进到 `inreview`（例如非 DevServer 且执行链条完结）。
+
+### Executors：把“不同 Agent 的运行方式”抽象成统一接口
+
+`crates/executors` 用于屏蔽不同编码 Agent 的差异：
+
+- 支持多种 executor（Claude Code/Codex/Gemini/Cursor/Copilot/Amp/Opencode/Qwen/Droid…）。
+- 将 stdout/stderr/工具调用/结构化事件“标准化”为 `NormalizedEntry`（供 UI 渲染对话、工具输出、diff、TODO 等）。
+- 通过 `profiles.json`（默认内置 + 用户覆盖）管理每个 executor 的参数、env、能力集（例如是否支持 MCP、是否支持 session fork 等）。
+
+## 前端架构（本地 UI）
+
+### 路由与页面
+
+`frontend/src/App.tsx` 使用 `react-router-dom`，核心页面包括：
+
+- Projects 列表页、Project Tasks 看板页
+- Settings（General / Projects / Organisations / Agents / MCP）
+- FullAttemptLogs（用于更“纯”的日志视图）
+
+### 数据获取与实时性
+
+- **TanStack Query**：用于常规 HTTP 请求缓存与状态管理。
+- **WebSocket JSON Patch**：用于任务列表、项目列表、diff、日志等实时流。
+- **Electric（远端共享任务）**：当你配置并登录托管端后，前端会通过 `@tanstack/react-db` + Electric shape 拉取/订阅 shared tasks（见 `frontend/src/lib/electric/*` 与 `frontend/src/hooks/useProjectTasks.ts`）。
+
+### 类型共享（Rust → TypeScript）
+
+- 生成入口：`crates/server/src/bin/generate_types.rs`
+- 生成命令：`pnpm run generate-types`（或 `pnpm run generate-types:check`）
+- 产物：`shared/types.ts`（不要手改；如需改动，优先修改 Rust 端类型与生成器）
+
+## 开发流程（本地）
+
+### 前置依赖
+
+- Rust（stable）
+- Node.js（>= 18）
+- pnpm（>= 8）
+-（建议）`cargo install cargo-watch`、`cargo install sqlx-cli`
+
+### 常用命令
+
+```bash
+pnpm i
+pnpm run dev
+```
+
+其他常用：
+
+- `pnpm run backend:dev:watch`：`cargo watch` 运行 `server`（`crates/` 变更自动重启）
+- `pnpm run frontend:dev`：Vite dev server
+- `pnpm run generate-types`：刷新 `shared/types.ts`
+- `pnpm run prepare-db`：生成/更新 SQLx 离线查询缓存（`crates/db/.sqlx`）
+- `cargo test --workspace`：Rust workspace 测试
+
+<Tip>
+开发模式下 `scripts/setup-dev-environment.js` 会自动选择可用端口并将 `dev_assets_seed/` 复制到 `dev_assets/`，其中包含初始 SQLite DB 等开发资产。
+</Tip>
+
+## 部署与发布（两条路径）
+
+### 1) 本地分发（npm + 预编译二进制）
+
+`npx vibe-kanban` 的行为是：
+
+1. 根据平台/架构选择对应的 zip（见 `npx-cli/bin/cli.js` 与 `npx-cli/bin/download`）。
+2. 下载到全局缓存（或本地 dev 模式目录），解压得到 `server` 二进制并执行。
+
+构建/打包可以参考 `./local-build.sh`（生成 server、MCP 二进制、review CLI，并写入 `npx-cli/dist/*`）。
+
+### 2) 容器化运行（Docker）
+
+仓库根部 `Dockerfile` 会：
+
+- 构建阶段：安装 Node + pnpm、生成 types、构建 `frontend/dist`、构建 Rust `server`。
+- 运行阶段：仅携带 `server` 二进制，并以 `HOST=0.0.0.0`、`PORT=3000` 启动。
+
+### 3) 托管端（remote stack：Postgres + Electric + remote server）
+
+`crates/remote/docker-compose.yml` 提供本地启动托管端的示例，核心组件：
+
+- `remote-db`：Postgres（含 logical replication 配置）
+- `electric`：ElectricSQL
+- `remote-server`：Rust 服务（同时托管 `remote-frontend` 静态资源）
+
+当你在本地运行 Vibe Kanban 时，设置 `VK_SHARED_API_BASE=http://localhost:8081` 可启用“远端能力”（组织/邀请、共享任务、Electric 同步、Review 上传等；详见 `crates/local-deployment/src/lib.rs`）。
+
+## 关键配置项速查
+
+### 本地（server）
+
+- `HOST`：监听地址（默认 `127.0.0.1`；容器中常设 `0.0.0.0`）
+- `PORT`：生产模式端口（未设置则自动分配）
+- `BACKEND_PORT`：开发模式后端端口（优先级高于 `PORT`）
+- `FRONTEND_PORT`：开发模式前端端口（Vite）
+- `VK_SHARED_API_BASE`：托管端 API base（启用共享/组织等远端特性）
+
+### MCP server
+
+- `VIBE_BACKEND_URL`：显式指定后端 base URL（否则读取端口文件与 `HOST`/`PORT`）
+
+### 托管端（remote）
+
+最小可用配置见 `crates/remote/README.md`，常见变量包括：
+
+- `SERVER_DATABASE_URL` / `ELECTRIC_URL` / `SERVER_LISTEN_ADDR`
+- OAuth：`GITHUB_OAUTH_CLIENT_ID`/`_SECRET`、`GOOGLE_OAUTH_CLIENT_ID`/`_SECRET`（至少一个）
+- `VIBEKANBAN_REMOTE_JWT_SECRET`、`SERVER_PUBLIC_BASE_URL`
+-（可选）R2 Review 上传：`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY`/`R2_REVIEW_ENDPOINT`/`R2_REVIEW_BUCKET`
+-（可选）`REVIEW_WORKER_BASE_URL`、GitHub App 相关变量
+
+## 常见问题排查
+
+### 前端未构建导致后端只显示占位页
+
+后端会在编译时尝试创建一个“占位”`frontend/dist/index.html` 以保证可编译（见 `crates/server/build.rs`）。发布/生产请确保先执行 `frontend` 构建。
+
+### SQLx prepare 失败
+
+先确保已安装 `sqlx-cli`，然后运行：
+
+```bash
+pnpm run prepare-db
+```
+
+它会创建临时 SQLite 文件、跑 migrations 并生成 `crates/db/.sqlx` 缓存。
+
