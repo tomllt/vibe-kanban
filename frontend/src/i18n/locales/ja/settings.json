@@ -123,8 +123,8 @@
           "placeholder": "vk",
           "helper": "自動生成されるブランチ名のプレフィックス。空欄にするとプレフィックスなしになります。",
           "preview": "プレビュー：",
-          "previewWithPrefix": "{{prefix}}/1a2b-タスク名",
-          "previewNoPrefix": "1a2b-タスク名",
+          "previewWithPrefix": "{{prefix}}/feature/1a2b-タスク名",
+          "previewNoPrefix": "feature/1a2b-タスク名",
           "errors": {
             "slash": "プレフィックスに'/'を含めることはできません。",
             "startsWithDot": "プレフィックスは'.'で始めることができません。",
@@ -132,6 +132,19 @@
             "invalidSequence": "無効なシーケンス（..、@{）が含まれています。",
             "invalidChars": "無効な文字が含まれています。",
             "controlChars": "制御文字が含まれています。"
+          }
+        },
+        "workflowAutomation": {
+          "title": "ワークフロー自動化",
+          "description": "有効にすると、タスクを Staging/Prod にドラッグした際に squash-merge を行い、設定したブランチへ（必要に応じて）push します。",
+          "enabled": {
+            "label": "ドラッグで昇格を有効化"
+          },
+          "stagingBranch": "Staging ブランチ",
+          "prodBranch": "Prod ブランチ",
+          "autoPush": {
+            "label": "マージ後に push",
+            "helper": "push により GitHub/GitLab リモートの CI/CD が起動します。"
           }
         }
       },

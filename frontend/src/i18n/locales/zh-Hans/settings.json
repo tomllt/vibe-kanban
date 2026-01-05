@@ -123,8 +123,8 @@
           "placeholder": "vk",
           "helper": "自动生成的分支名称的前缀。留空表示无前缀。",
           "preview": "预览：",
-          "previewWithPrefix": "{{prefix}}/1a2b-task-name",
-          "previewNoPrefix": "1a2b-task-name",
+          "previewWithPrefix": "{{prefix}}/feature/1a2b-task-name",
+          "previewNoPrefix": "feature/1a2b-task-name",
           "errors": {
             "slash": "前缀不能包含 '/'。",
             "startsWithDot": "前缀不能以 '.' 开头。",
@@ -132,6 +132,19 @@
             "invalidSequence": "包含无效序列（..、@{）。",
             "invalidChars": "包含无效字符。",
             "controlChars": "包含控制字符。"
+          }
+        },
+        "workflowAutomation": {
+          "title": "工作流自动化",
+          "description": "启用后，将任务拖到 Staging/Prod 时会进行 squash-merge，并可选推送到配置的分支。",
+          "enabled": {
+            "label": "启用拖拽升阶"
+          },
+          "stagingBranch": "Staging 分支",
+          "prodBranch": "Prod 分支",
+          "autoPush": {
+            "label": "合并后推送",
+            "helper": "推送会触发 GitHub/GitLab 远端的 CI/CD。"
           }
         }
       },

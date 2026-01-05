@@ -274,6 +274,9 @@
   "createAttemptDialog": {
     "title": "Create Attempt",
     "description": "Start a new attempt with a coding agent. A git worktree and task branch will be created.",
+    "branchKind": "Branch type",
+    "branchKindFeature": "Feature",
+    "branchKindHotfix": "Hotfix",
     "baseBranch": "Base branch",
     "loadingBranches": "Loading branches...",
     "selectBranch": "Select branch",

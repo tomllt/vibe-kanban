@@ -13,6 +13,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use db::models::{
+    environment_promotion::{EnvironmentPromotion, PromotionStatus, WorkflowEnvironment},
     image::TaskImage,
     project::{Project, ProjectError},
     repo::Repo,
@@ -27,7 +28,10 @@ use executors::profile::ExecutorProfileId;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use services::services::{
-    container::ContainerService, share::ShareError, workspace_manager::WorkspaceManager,
+    container::ContainerService,
+    git::GitBranchKind,
+    share::ShareError,
+    workspace_manager::WorkspaceManager,
 };
 use sqlx::Error as SqlxError;
 use ts_rs::TS;
@@ -147,6 +151,9 @@ pub struct CreateAndStartTaskRequest {
     pub task: CreateTask,
     pub executor_profile_id: ExecutorProfileId,
     pub repos: Vec<WorkspaceRepoInput>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub branch_kind: Option<GitBranchKind>,
 }
 
 pub async fn create_task_and_start(
@@ -185,9 +192,10 @@ pub async fn create_task_and_start(
         .ok_or(ProjectError::ProjectNotFound)?;
 
     let attempt_id = Uuid::new_v4();
+    let branch_kind = payload.branch_kind.unwrap_or(GitBranchKind::Feature);
     let git_branch_name = deployment
         .container()
-        .git_branch_from_workspace(&attempt_id, &task.title)
+        .git_branch_from_workspace_with_kind(&attempt_id, &task.title, branch_kind)
         .await;
 
     let agent_working_dir = project
@@ -245,6 +253,7 @@ pub async fn create_task_and_start(
         has_in_progress_attempt: is_attempt_running,
         last_attempt_failed: false,
         executor: payload.executor_profile_id.executor.to_string(),
+        environment_promotions: None,
     })))
 }
 
@@ -255,6 +264,8 @@ pub async fn update_task(
     Json(payload): Json<UpdateTask>,
 ) -> Result<ResponseJson<ApiResponse<Task>>, ApiError> {
     ensure_shared_task_auth(&existing_task, &deployment).await?;
+
+    let old_status = existing_task.status.clone();
 
     // Use existing values if not provided in update
     let title = payload.title.unwrap_or(existing_task.title);
@@ -267,6 +278,31 @@ pub async fn update_task(
     let parent_workspace_id = payload
         .parent_workspace_id
         .or(existing_task.parent_workspace_id);
+
+    // If moving into Staging/Prod, optionally run workflow promotion first.
+    if old_status != status {
+        let workflow = deployment.config().read().await.workflow_automation.clone();
+        if workflow.enabled {
+            let env = match status {
+                db::models::task::TaskStatus::InReview => Some(WorkflowEnvironment::Staging),
+                db::models::task::TaskStatus::Done => Some(WorkflowEnvironment::Prod),
+                _ => None,
+            };
+
+            if let Some(environment) = env {
+                promote_task_to_environment(
+                    &deployment,
+                    existing_task.id,
+                    &title,
+                    description.as_deref(),
+                    old_status.clone(),
+                    environment,
+                    workflow,
+                )
+                .await?;
+            }
+        }
+    }
 
     let task = Task::update(
         &deployment.db().pool,
@@ -295,6 +331,148 @@ pub async fn update_task(
     Ok(ResponseJson(ApiResponse::success(task)))
 }
 
+async fn promote_task_to_environment(
+    deployment: &DeploymentImpl,
+    task_id: Uuid,
+    title: &str,
+    description: Option<&str>,
+    current_status: db::models::task::TaskStatus,
+    environment: WorkflowEnvironment,
+    workflow: services::services::config::WorkflowAutomationConfig,
+) -> Result<(), ApiError> {
+    // Guardrails: only promote from a clean, idle workspace.
+    if deployment
+        .container()
+        .has_running_processes(task_id)
+        .await?
+    {
+        return Err(ApiError::Conflict(
+            "Task has running execution processes; stop them before promoting.".to_string(),
+        ));
+    }
+
+    let pool = &deployment.db().pool;
+    let workspaces = Workspace::fetch_all(pool, Some(task_id)).await?;
+    let workspace = workspaces.into_iter().next().ok_or_else(|| {
+        ApiError::Conflict("No attempt exists for this task; create an attempt first.".to_string())
+    })?;
+
+    let container_ref = deployment
+        .container()
+        .ensure_container_exists(&workspace)
+        .await?;
+    if !deployment.container().is_container_clean(&workspace).await? {
+        return Err(ApiError::Conflict(
+            "Attempt has uncommitted changes; commit or stash before promoting.".to_string(),
+        ));
+    }
+
+    let target_branch = match environment {
+        WorkflowEnvironment::Staging => workflow.staging_branch.clone(),
+        WorkflowEnvironment::Prod => workflow.prod_branch.clone(),
+    };
+
+    let repos = WorkspaceRepo::find_repos_with_target_branch_for_workspace(pool, workspace.id)
+        .await?
+        .into_iter()
+        .map(|r| r.repo)
+        .collect::<Vec<_>>();
+
+    if repos.is_empty() {
+        return Err(ApiError::Conflict(
+            "Attempt has no repositories attached; cannot promote.".to_string(),
+        ));
+    }
+
+    let task_uuid_str = task_id.to_string();
+    let short_id = task_uuid_str
+        .split('-')
+        .next()
+        .unwrap_or(&task_uuid_str)
+        .to_string();
+
+    let mut commit_message = format!(
+        "{title} (promote to {environment:?}) (vibe-kanban {short_id})"
+    );
+    if let Some(desc) = description.filter(|d| !d.trim().is_empty()) {
+        commit_message.push_str("\n\n");
+        commit_message.push_str(desc);
+    }
+
+    let workspace_path = PathBuf::from(container_ref);
+    let mut merged_commit: Option<String> = None;
+
+    let result: Result<(), ApiError> = async {
+        for repo in &repos {
+            // Ensure we have a local `target_branch` ref to update.
+            deployment
+                .git()
+                .sync_local_branch_with_default_remote(&repo.path, &target_branch)?;
+
+            let worktree_path = workspace_path.join(&repo.name);
+
+            let sha = deployment.git().merge_changes(
+                &repo.path,
+                &worktree_path,
+                &workspace.branch,
+                &target_branch,
+                &commit_message,
+            )?;
+
+            // Push the target branch to trigger CI/CD (works for GitHub and GitLab remotes).
+            if workflow.auto_push {
+                deployment.git().push_to_github(&repo.path, &target_branch, false)?;
+            }
+
+            if repos.len() == 1 {
+                merged_commit = Some(sha);
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    let promotion_id = Uuid::new_v4();
+    match result {
+        Ok(()) => {
+            let success_message = if workflow.auto_push {
+                format!("Merged and pushed to '{target_branch}'")
+            } else {
+                format!("Merged to '{target_branch}' (not pushed)")
+            };
+            EnvironmentPromotion::create(
+                pool,
+                promotion_id,
+                task_id,
+                Some(workspace.id),
+                environment,
+                PromotionStatus::Succeeded,
+                &target_branch,
+                merged_commit.as_deref(),
+                Some(&success_message),
+            )
+            .await?;
+            Ok(())
+        }
+        Err(err) => {
+            let err_message = err.to_string();
+            EnvironmentPromotion::create(
+                pool,
+                promotion_id,
+                task_id,
+                Some(workspace.id),
+                environment,
+                PromotionStatus::Failed,
+                &target_branch,
+                None,
+                Some(&err_message),
+            )
+            .await?;
+            // Trigger a task update event so clients can pick up the new promotion record.
+            Task::update_status(pool, task_id, current_status).await?;
+            Err(err)
+        }
+    }
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct BacklogGroomerGenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

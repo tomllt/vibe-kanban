@@ -10,6 +10,13 @@ pub fn is_valid_branch_prefix(prefix: &str) -> bool {
     git2::Branch::name_is_valid(&format!("{prefix}/x")).unwrap_or_default()
 }
 
+pub fn is_valid_branch_name(name: &str) -> bool {
+    if name.trim().is_empty() {
+        return false;
+    }
+    git2::Branch::name_is_valid(name).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -43,5 +50,20 @@ mod tests {
         assert!(!is_valid_branch_prefix("/foo"));
         assert!(!is_valid_branch_prefix("foo/"));
         assert!(!is_valid_branch_prefix(".foo"));
+    }
+
+    #[test]
+    fn test_valid_branch_names() {
+        assert!(is_valid_branch_name("main"));
+        assert!(is_valid_branch_name("staging"));
+        assert!(is_valid_branch_name("feature/foo"));
+    }
+
+    #[test]
+    fn test_invalid_branch_names() {
+        assert!(!is_valid_branch_name(""));
+        assert!(!is_valid_branch_name(" "));
+        assert!(!is_valid_branch_name("foo..bar"));
+        assert!(!is_valid_branch_name("foo lock"));
     }
 }

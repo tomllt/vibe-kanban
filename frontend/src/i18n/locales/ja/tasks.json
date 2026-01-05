@@ -198,6 +198,9 @@
   },
   "createAttemptDialog": {
     "baseBranch": "Base branch",
+    "branchKind": "Branch type",
+    "branchKindFeature": "Feature",
+    "branchKindHotfix": "Hotfix",
     "creating": "Creating...",
     "description": "Start a new attempt with a coding agent. A git worktree and task branch will be created.",
     "error": "Failed to create attempt. Please try again.",
