@@ -13,6 +13,7 @@ use db::models::{
     workspace::Workspace,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use utils::response::ApiResponse;
 
 use crate::DeploymentImpl;
@@ -22,6 +23,8 @@ const ENV_GITHUB_SECRET_FALLBACK: &str = "GITHUB_APP_WEBHOOK_SECRET";
 
 const ENV_GITLAB_TOKEN_PRIMARY: &str = "GITLAB_WEBHOOK_TOKEN";
 const ENV_GITLAB_TOKEN_FALLBACK: &str = "GITLAB_WEBHOOK_SECRET";
+
+const MAX_STORED_PAYLOAD_BYTES: usize = 200_000;
 
 #[derive(Debug, Serialize)]
 pub struct WebhookAck {
@@ -72,7 +75,6 @@ async fn github_webhook(
         return unauthorized("invalid signature");
     }
 
-    let payload_json = String::from_utf8_lossy(&body).to_string();
     let pool = &deployment.db().pool;
 
     let inserted = match upsert_delivery(
@@ -80,8 +82,8 @@ async fn github_webhook(
         "github",
         &delivery_id,
         &event,
-        true,
-        &payload_json,
+        signature_valid,
+        &body,
     )
     .await
     {
@@ -116,15 +118,25 @@ async fn github_webhook(
             {
                 tracing::warn!(?err, "failed to mark webhook delivery status");
             }
-            ok(WebhookAck {
+            let ack = WebhookAck {
                 provider: "github",
-                event,
-                delivery_id,
+                event: event.clone(),
+                delivery_id: delivery_id.clone(),
                 status,
                 deduped: false,
                 updated_merges,
                 updated_tasks,
-            })
+            };
+            tracing::info!(
+                provider = "github",
+                event = %event,
+                delivery_id = %delivery_id,
+                status = %status,
+                updated_merges = updated_merges,
+                updated_tasks = updated_tasks,
+                "webhook processed"
+            );
+            ok(ack)
         }
         Err(err) => {
             tracing::error!(?err, event = %event, delivery_id = %delivery_id, "webhook processing failed");
@@ -146,9 +158,11 @@ async fn gitlab_webhook(
     let Some(event) = header_str(&headers, "X-Gitlab-Event") else {
         return bad_request("missing X-Gitlab-Event");
     };
-    let delivery_id = header_str(&headers, "X-Gitlab-Event-UUID")
+    let Some(delivery_id) = header_str(&headers, "X-Gitlab-Event-UUID")
         .or_else(|| header_str(&headers, "X-Request-Id"))
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    else {
+        return bad_request("missing X-Gitlab-Event-UUID (or X-Request-Id)");
+    };
 
     let Some(token_header) = header_str(&headers, "X-Gitlab-Token") else {
         return unauthorized("missing X-Gitlab-Token");
@@ -167,11 +181,10 @@ async fn gitlab_webhook(
         return unauthorized("invalid token");
     }
 
-    let payload_json = String::from_utf8_lossy(&body).to_string();
     let pool = &deployment.db().pool;
 
     let inserted =
-        match upsert_delivery(pool, "gitlab", &delivery_id, &event, true, &payload_json).await {
+        match upsert_delivery(pool, "gitlab", &delivery_id, &event, true, &body).await {
             Ok(inserted) => inserted,
             Err(err) => {
                 tracing::error!(?err, "failed to store webhook delivery");
@@ -201,15 +214,25 @@ async fn gitlab_webhook(
             if let Err(err) = mark_delivery(pool, "gitlab", &delivery_id, status, None).await {
                 tracing::warn!(?err, "failed to mark webhook delivery status");
             }
-            ok(WebhookAck {
+            let ack = WebhookAck {
                 provider: "gitlab",
-                event,
-                delivery_id,
+                event: event.clone(),
+                delivery_id: delivery_id.clone(),
                 status,
                 deduped: false,
                 updated_merges,
                 updated_tasks,
-            })
+            };
+            tracing::info!(
+                provider = "gitlab",
+                event = %event,
+                delivery_id = %delivery_id,
+                status = %status,
+                updated_merges = updated_merges,
+                updated_tasks = updated_tasks,
+                "webhook processed"
+            );
+            ok(ack)
         }
         Err(err) => {
             tracing::error!(?err, event = %event, delivery_id = %delivery_id, "webhook processing failed");
@@ -239,11 +262,24 @@ async fn process_github_event(
             let payload: GitHubPullRequestEvent = serde_json::from_slice(body)?;
             process_github_pull_request(deployment, payload).await
         }
-        "push" | "check_run" => Ok(ProcessResult {
-            status: "ignored",
-            updated_merges: 0,
-            updated_tasks: 0,
-        }),
+        "push" => {
+            let payload: GitHubPushEvent = serde_json::from_slice(body)?;
+            upsert_repo_state_github_push(&deployment.db().pool, payload).await?;
+            Ok(ProcessResult {
+                status: "processed",
+                updated_merges: 0,
+                updated_tasks: 0,
+            })
+        }
+        "check_run" => {
+            let payload: GitHubCheckRunEvent = serde_json::from_slice(body)?;
+            upsert_repo_state_github_check_run(&deployment.db().pool, payload).await?;
+            Ok(ProcessResult {
+                status: "processed",
+                updated_merges: 0,
+                updated_tasks: 0,
+            })
+        }
         _ => Ok(ProcessResult {
             status: "ignored",
             updated_merges: 0,
@@ -257,15 +293,22 @@ async fn process_gitlab_event(
     _event: &str,
     body: &[u8],
 ) -> anyhow::Result<ProcessResult> {
-    // GitLab event naming is inconsistent across hook types, so key off payload content
-    let payload: GitLabWebhook = serde_json::from_slice(body)?;
-    match payload.object_kind.as_str() {
-        "merge_request" => process_gitlab_merge_request(deployment, payload).await,
-        "push" => Ok(ProcessResult {
-            status: "ignored",
-            updated_merges: 0,
-            updated_tasks: 0,
-        }),
+    // GitLab event naming is inconsistent across hook types, so key off payload content.
+    let base: GitLabBaseEvent = serde_json::from_slice(body)?;
+    match base.object_kind.as_str() {
+        "merge_request" => {
+            let payload: GitLabMergeRequestEvent = serde_json::from_slice(body)?;
+            process_gitlab_merge_request(deployment, payload).await
+        }
+        "push" => {
+            let payload: GitLabPushEvent = serde_json::from_slice(body)?;
+            upsert_repo_state_gitlab_push(&deployment.db().pool, payload).await?;
+            Ok(ProcessResult {
+                status: "processed",
+                updated_merges: 0,
+                updated_tasks: 0,
+            })
+        }
         _ => Ok(ProcessResult {
             status: "ignored",
             updated_merges: 0,
@@ -322,7 +365,7 @@ async fn process_github_pull_request(
 
 async fn process_gitlab_merge_request(
     deployment: &DeploymentImpl,
-    payload: GitLabWebhook,
+    payload: GitLabMergeRequestEvent,
 ) -> anyhow::Result<ProcessResult> {
     let Some(attrs) = payload.object_attributes else {
         return Ok(ProcessResult {
@@ -333,7 +376,7 @@ async fn process_gitlab_merge_request(
     };
 
     let next_status = gitlab_mr_status(&attrs);
-    let pr_url = attrs.url;
+    let pr_url = gitlab_merge_request_url(&attrs).to_string();
     let merge_commit_sha = attrs.merge_commit_sha;
 
     let pool = &deployment.db().pool;
@@ -524,7 +567,7 @@ mod tests {
             "deliv-1",
             "pull_request",
             true,
-            "{}",
+            b"{}",
         )
         .await
         .unwrap();
@@ -536,7 +579,7 @@ mod tests {
             "deliv-1",
             "pull_request",
             true,
-            "{}",
+            b"{}",
         )
         .await
         .unwrap();
@@ -553,11 +596,163 @@ mod tests {
 
         assert_eq!(attempts, 2);
     }
+
+    #[tokio::test]
+    async fn upsert_delivery_stores_hash_and_truncation_metadata() {
+        let pool = setup_db().await;
+
+        let mut payload = vec![b'a'; MAX_STORED_PAYLOAD_BYTES + 10];
+        payload[0] = b'{';
+        payload[1] = b'}';
+
+        let inserted = upsert_delivery(
+            &pool,
+            "github",
+            "deliv-big",
+            "pull_request",
+            true,
+            &payload,
+        )
+        .await
+        .unwrap();
+        assert!(inserted);
+
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            payload_sha256: Option<String>,
+            payload_bytes: i64,
+            payload_truncated: i64,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            r#"SELECT payload_sha256, payload_bytes, payload_truncated
+               FROM webhook_deliveries
+               WHERE provider = ? AND delivery_id = ?"#,
+        )
+        .bind("github")
+        .bind("deliv-big")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(row.payload_sha256.is_some());
+        assert_eq!(row.payload_bytes, (MAX_STORED_PAYLOAD_BYTES + 10) as i64);
+        assert_eq!(row.payload_truncated, 1);
+    }
+
+    #[tokio::test]
+    async fn upsert_repo_state_merges_push_and_check_run() {
+        let pool = setup_db().await;
+
+        upsert_repo_state_github_push(
+            &pool,
+            GitHubPushEvent {
+                git_ref: "refs/heads/main".to_string(),
+                after: "1111111".to_string(),
+                repository: GitHubRepo {
+                    full_name: "o/r".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        upsert_repo_state_github_check_run(
+            &pool,
+            GitHubCheckRunEvent {
+                repository: GitHubRepo {
+                    full_name: "o/r".to_string(),
+                },
+                check_run: GitHubCheckRun {
+                    head_sha: "2222222".to_string(),
+                    status: Some("completed".to_string()),
+                    conclusion: Some("success".to_string()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            last_push_ref: Option<String>,
+            last_push_sha: Option<String>,
+            last_check_run_sha: Option<String>,
+            last_check_run_status: Option<String>,
+            last_check_run_conclusion: Option<String>,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            r#"SELECT
+                    last_push_ref,
+                    last_push_sha,
+                    last_check_run_sha,
+                    last_check_run_status,
+                    last_check_run_conclusion
+               FROM webhook_repo_states
+               WHERE provider = ? AND repo_key = ?"#,
+        )
+        .bind("github")
+        .bind("o/r")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.last_push_ref.as_deref(), Some("refs/heads/main"));
+        assert_eq!(row.last_push_sha.as_deref(), Some("1111111"));
+        assert_eq!(row.last_check_run_sha.as_deref(), Some("2222222"));
+        assert_eq!(row.last_check_run_status.as_deref(), Some("completed"));
+        assert_eq!(row.last_check_run_conclusion.as_deref(), Some("success"));
+    }
+
+    #[test]
+    fn gitlab_url_prefers_web_url() {
+        let attrs = GitLabMergeRequestAttributes {
+            url: "https://gitlab.example/api/v4/projects/1/merge_requests/2".to_string(),
+            web_url: Some("https://gitlab.example/group/proj/-/merge_requests/2".to_string()),
+            state: "opened".to_string(),
+            merged_at: None,
+            merge_commit_sha: None,
+        };
+
+        assert_eq!(
+            gitlab_merge_request_url(&attrs),
+            "https://gitlab.example/group/proj/-/merge_requests/2"
+        );
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct GitHubPullRequestEvent {
     pull_request: GitHubPullRequest,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubRepo {
+    full_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPushEvent {
+    #[serde(rename = "ref")]
+    git_ref: String,
+    after: String,
+    repository: GitHubRepo,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubCheckRunEvent {
+    check_run: GitHubCheckRun,
+    repository: GitHubRepo,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubCheckRun {
+    head_sha: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -580,8 +775,12 @@ fn github_pr_status(pr: &GitHubPullRequest) -> MergeStatus {
 }
 
 #[derive(Debug, Deserialize)]
-struct GitLabWebhook {
+struct GitLabBaseEvent {
     object_kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitLabMergeRequestEvent {
     #[serde(default)]
     object_attributes: Option<GitLabMergeRequestAttributes>,
 }
@@ -589,11 +788,29 @@ struct GitLabWebhook {
 #[derive(Debug, Deserialize)]
 struct GitLabMergeRequestAttributes {
     url: String,
+    #[serde(default)]
+    web_url: Option<String>,
     state: String,
     #[serde(default)]
     merged_at: Option<String>,
     #[serde(default)]
     merge_commit_sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitLabPushEvent {
+    #[serde(rename = "ref")]
+    git_ref: String,
+    #[serde(default)]
+    checkout_sha: Option<String>,
+    #[serde(default)]
+    after: Option<String>,
+    project: GitLabProject,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitLabProject {
+    path_with_namespace: String,
 }
 
 fn gitlab_mr_status(attrs: &GitLabMergeRequestAttributes) -> MergeStatus {
@@ -606,6 +823,10 @@ fn gitlab_mr_status(attrs: &GitLabMergeRequestAttributes) -> MergeStatus {
         "closed" => MergeStatus::Closed,
         _ => MergeStatus::Unknown,
     }
+}
+
+fn gitlab_merge_request_url(attrs: &GitLabMergeRequestAttributes) -> &str {
+    attrs.web_url.as_deref().unwrap_or(&attrs.url)
 }
 
 fn read_env_secret(primary: &str, fallback: &str) -> Option<String> {
@@ -639,14 +860,43 @@ async fn upsert_delivery(
     delivery_id: &str,
     event: &str,
     signature_valid: bool,
-    payload_json: &str,
+    payload: &[u8],
 ) -> Result<bool, sqlx::Error> {
+    fn bytes_to_hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            write!(&mut s, "{:02x}", b).expect("hex write should not fail");
+        }
+        s
+    }
+
     let id = uuid::Uuid::new_v4();
+    let payload_bytes = payload.len() as i64;
+    let payload_sha256 = bytes_to_hex(Sha256::digest(payload).as_ref());
+
+    let payload_truncated = payload.len() > MAX_STORED_PAYLOAD_BYTES;
+    let payload_slice = if payload_truncated {
+        &payload[..MAX_STORED_PAYLOAD_BYTES]
+    } else {
+        payload
+    };
+    let payload_json = String::from_utf8_lossy(payload_slice).to_string();
 
     let result = sqlx::query(
         r#"INSERT INTO webhook_deliveries (
-                id, provider, delivery_id, event, signature_valid, status, attempts, payload_json
-           ) VALUES (?, ?, ?, ?, ?, 'received', 1, ?)
+                id,
+                provider,
+                delivery_id,
+                event,
+                signature_valid,
+                payload_sha256,
+                payload_bytes,
+                payload_truncated,
+                status,
+                attempts,
+                payload_json
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'received', 1, ?)
            ON CONFLICT(provider, delivery_id) DO NOTHING"#,
     )
     .bind(id)
@@ -654,6 +904,9 @@ async fn upsert_delivery(
     .bind(delivery_id)
     .bind(event)
     .bind(signature_valid as i64)
+    .bind(payload_sha256)
+    .bind(payload_bytes)
+    .bind(payload_truncated as i64)
     .bind(payload_json)
     .execute(pool)
     .await?;
@@ -697,6 +950,104 @@ async fn mark_delivery(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn upsert_repo_state(
+    pool: &sqlx::SqlitePool,
+    provider: &str,
+    repo_key: &str,
+    last_push_ref: Option<&str>,
+    last_push_sha: Option<&str>,
+    last_check_run_sha: Option<&str>,
+    last_check_run_status: Option<&str>,
+    last_check_run_conclusion: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let id = uuid::Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO webhook_repo_states (
+                id,
+                provider,
+                repo_key,
+                last_push_ref,
+                last_push_sha,
+                last_check_run_sha,
+                last_check_run_status,
+                last_check_run_conclusion
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(provider, repo_key) DO UPDATE SET
+                last_push_ref = COALESCE(excluded.last_push_ref, last_push_ref),
+                last_push_sha = COALESCE(excluded.last_push_sha, last_push_sha),
+                last_check_run_sha = COALESCE(excluded.last_check_run_sha, last_check_run_sha),
+                last_check_run_status = COALESCE(excluded.last_check_run_status, last_check_run_status),
+                last_check_run_conclusion = COALESCE(excluded.last_check_run_conclusion, last_check_run_conclusion),
+                updated_at = datetime('now', 'subsec')"#,
+    )
+    .bind(id)
+    .bind(provider)
+    .bind(repo_key)
+    .bind(last_push_ref)
+    .bind(last_push_sha)
+    .bind(last_check_run_sha)
+    .bind(last_check_run_status)
+    .bind(last_check_run_conclusion)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn upsert_repo_state_github_push(
+    pool: &sqlx::SqlitePool,
+    payload: GitHubPushEvent,
+) -> Result<(), sqlx::Error> {
+    upsert_repo_state(
+        pool,
+        "github",
+        &payload.repository.full_name,
+        Some(&payload.git_ref),
+        Some(&payload.after),
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+async fn upsert_repo_state_github_check_run(
+    pool: &sqlx::SqlitePool,
+    payload: GitHubCheckRunEvent,
+) -> Result<(), sqlx::Error> {
+    upsert_repo_state(
+        pool,
+        "github",
+        &payload.repository.full_name,
+        None,
+        None,
+        Some(&payload.check_run.head_sha),
+        payload.check_run.status.as_deref(),
+        payload.check_run.conclusion.as_deref(),
+    )
+    .await
+}
+
+async fn upsert_repo_state_gitlab_push(
+    pool: &sqlx::SqlitePool,
+    payload: GitLabPushEvent,
+) -> Result<(), sqlx::Error> {
+    let sha = payload
+        .checkout_sha
+        .as_deref()
+        .or(payload.after.as_deref());
+    upsert_repo_state(
+        pool,
+        "gitlab",
+        &payload.project.path_with_namespace,
+        Some(&payload.git_ref),
+        sha,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 fn ok(ack: WebhookAck) -> (StatusCode, ResponseJson<ApiResponse<WebhookAck>>) {

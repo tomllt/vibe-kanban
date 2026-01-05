@@ -5,6 +5,9 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
     delivery_id     TEXT NOT NULL,
     event           TEXT NOT NULL,
     signature_valid INTEGER NOT NULL DEFAULT 0,
+    payload_sha256  TEXT,
+    payload_bytes   INTEGER NOT NULL DEFAULT 0,
+    payload_truncated INTEGER NOT NULL DEFAULT 0,
     received_at     TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
     processed_at    TEXT,
     status          TEXT NOT NULL DEFAULT 'received'
@@ -19,4 +22,3 @@ CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_provider_event
     ON webhook_deliveries(provider, event);
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status
     ON webhook_deliveries(status);
-
