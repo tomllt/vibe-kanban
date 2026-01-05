@@ -28,6 +28,7 @@ use services::services::{
         CreatePrRequest, CreatePrReviewCommentInput, GitHubService, GitHubServiceError,
         UnifiedPrComment,
     },
+    gitlab::{CreateGitLabReviewCommentInput, GitLabMergeRequestRef, GitLabService, GitLabServiceError},
 };
 use ts_rs::TS;
 use utils::response::ApiResponse;
@@ -63,11 +64,27 @@ pub struct AttachPrResponse {
     pub pr_url: Option<String>,
     pub pr_number: Option<i64>,
     pub pr_status: Option<MergeStatus>,
+    pub provider: Option<CodeHostProvider>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeHostProvider {
+    Github,
+    Gitlab,
 }
 
 #[derive(Debug, Deserialize, Serialize, TS)]
 pub struct AttachExistingPrRequest {
     pub repo_id: Uuid,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+pub enum AttachPrError {
+    GitlabTokenMissing,
+    UnsupportedProvider,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -82,6 +99,10 @@ pub enum GetPrCommentsError {
     NoPrAttached,
     GithubCliNotInstalled,
     GithubCliNotLoggedIn,
+    GitlabTokenMissing,
+    InsufficientPermissions,
+    NotFound,
+    UnsupportedProvider,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -113,6 +134,8 @@ pub enum SubmitPrReviewCommentsError {
     GithubCliNotLoggedIn,
     InsufficientPermissions,
     InvalidComment { message: String },
+    GitlabTokenMissing,
+    UnsupportedProvider,
 }
 
 pub const DEFAULT_PR_DESCRIPTION_PROMPT: &str = r#"Update the GitHub PR that was just created with a better title and description.
@@ -391,7 +414,7 @@ pub async fn attach_existing_pr(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
     Json(request): Json<AttachExistingPrRequest>,
-) -> Result<ResponseJson<ApiResponse<AttachPrResponse>>, ApiError> {
+) -> Result<ResponseJson<ApiResponse<AttachPrResponse, AttachPrError>>, ApiError> {
     let pool = &deployment.db().pool;
 
     let task = workspace
@@ -416,76 +439,152 @@ pub async fn attach_existing_pr(
             pr_url: Some(pr_merge.pr_info.url.clone()),
             pr_number: Some(pr_merge.pr_info.number),
             pr_status: Some(pr_merge.pr_info.status.clone()),
+            provider: if pr_merge.pr_info.url.contains("/-/merge_requests/") {
+                Some(CodeHostProvider::Gitlab)
+            } else if pr_merge.pr_info.url.contains("github.com/")
+                || pr_merge.pr_info.url.contains("/pull/")
+            {
+                Some(CodeHostProvider::Github)
+            } else {
+                None
+            },
         })));
     }
 
-    let github_service = GitHubService::new()?;
-    let repo_info = deployment.git().get_github_repo_info(&repo.path)?;
+    // Try GitHub first (gh CLI)
+    if let Ok(repo_info) = deployment.git().get_github_repo_info(&repo.path) {
+        let github_service = GitHubService::new()?;
+        let prs = github_service
+            .list_all_prs_for_branch(&repo_info, &workspace.branch)
+            .await?;
 
-    // List all PRs for branch (open, closed, and merged)
-    let prs = github_service
-        .list_all_prs_for_branch(&repo_info, &workspace.branch)
-        .await?;
-
-    // Take the first PR (prefer open, but also accept merged/closed)
-    if let Some(pr_info) = prs.into_iter().next() {
-        // Save PR info to database
-        let merge = Merge::create_pr(
-            pool,
-            workspace.id,
-            workspace_repo.repo_id,
-            &workspace_repo.target_branch,
-            pr_info.number,
-            &pr_info.url,
-        )
-        .await?;
-
-        // Update status if not open
-        if !matches!(pr_info.status, MergeStatus::Open) {
-            Merge::update_status(
+        if let Some(pr_info) = prs.into_iter().next() {
+            let merge = Merge::create_pr(
                 pool,
-                merge.id,
-                pr_info.status.clone(),
-                pr_info.merge_commit_sha.clone(),
+                workspace.id,
+                workspace_repo.repo_id,
+                &workspace_repo.target_branch,
+                pr_info.number,
+                &pr_info.url,
             )
             .await?;
-        }
 
-        // If PR is merged, mark task as done
-        if matches!(pr_info.status, MergeStatus::Merged) {
-            Task::update_status(pool, task.id, TaskStatus::Done).await?;
+            if !matches!(pr_info.status, MergeStatus::Open) {
+                Merge::update_status(pool, merge.id, pr_info.status.clone(), pr_info.merge_commit_sha.clone())
+                    .await?;
+            }
 
-            // Try broadcast update to other users in organization
-            if let Ok(publisher) = deployment.share_publisher() {
-                if let Err(err) = publisher.update_shared_task_by_id(task.id).await {
+            if matches!(pr_info.status, MergeStatus::Merged) {
+                Task::update_status(pool, task.id, TaskStatus::Done).await?;
+                if let Ok(publisher) = deployment.share_publisher()
+                    && let Err(err) = publisher.update_shared_task_by_id(task.id).await
+                {
                     tracing::warn!(
                         ?err,
                         "Failed to propagate shared task update for {}",
                         task.id
                     );
                 }
-            } else {
-                tracing::debug!(
-                    "Share publisher unavailable; skipping remote update for {}",
-                    task.id
-                );
             }
+
+            return Ok(ResponseJson(ApiResponse::success(AttachPrResponse {
+                pr_attached: true,
+                pr_url: Some(pr_info.url),
+                pr_number: Some(pr_info.number),
+                pr_status: Some(pr_info.status),
+                provider: Some(CodeHostProvider::Github),
+            })));
         }
 
-        Ok(ResponseJson(ApiResponse::success(AttachPrResponse {
-            pr_attached: true,
-            pr_url: Some(pr_info.url),
-            pr_number: Some(pr_info.number),
-            pr_status: Some(pr_info.status),
-        })))
-    } else {
-        Ok(ResponseJson(ApiResponse::success(AttachPrResponse {
+        return Ok(ResponseJson(ApiResponse::success(AttachPrResponse {
             pr_attached: false,
             pr_url: None,
             pr_number: None,
             pr_status: None,
-        })))
+            provider: Some(CodeHostProvider::Github),
+        })));
     }
+
+    // Fall back to GitLab API (token)
+    let gitlab_repo = deployment.git().get_gitlab_repo_info(&repo.path)?;
+    let config = deployment.config().read().await;
+    let token = config
+        .gitlab
+        .token
+        .clone()
+        .or_else(|| std::env::var("GITLAB_TOKEN").ok());
+    let base_url = config
+        .gitlab
+        .base_url
+        .clone()
+        .unwrap_or_else(|| gitlab_repo.base_url.clone());
+    drop(config);
+
+    let Some(token) = token else {
+        return Ok(ResponseJson(ApiResponse::error_with_data(
+            AttachPrError::GitlabTokenMissing,
+        )));
+    };
+
+    let gitlab = GitLabService::new(&base_url, &token)
+        .map_err(|e| ApiError::BadRequest(format!("Failed to initialize GitLab client: {e}")))?;
+
+    let mrs = gitlab
+        .list_merge_requests_for_branch(&gitlab_repo.project_path, &workspace.branch)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("Failed to list GitLab merge requests: {e}")))?;
+
+    // Prefer an open MR on this branch, but allow merged/closed as a fallback.
+    let best_mr = mrs.into_iter().max_by_key(|mr| match mr.state.as_str() {
+        "opened" => 3,
+        "merged" => 2,
+        "closed" => 1,
+        _ => 0,
+    });
+
+    if let Some(mr) = best_mr {
+        let status = match mr.state.as_str() {
+            "opened" => MergeStatus::Open,
+            "merged" => MergeStatus::Merged,
+            "closed" => MergeStatus::Closed,
+            _ => MergeStatus::Unknown,
+        };
+
+        let merge = Merge::create_pr(
+            pool,
+            workspace.id,
+            workspace_repo.repo_id,
+            &workspace_repo.target_branch,
+            mr.iid,
+            &mr.url,
+        )
+        .await?;
+
+        if !matches!(status, MergeStatus::Open) {
+            Merge::update_status(pool, merge.id, status.clone(), mr.merge_commit_sha.clone())
+                .await?;
+        }
+
+        if matches!(status, MergeStatus::Merged) {
+            Task::update_status(pool, task.id, TaskStatus::Done).await?;
+        }
+
+        return Ok(ResponseJson(ApiResponse::success(AttachPrResponse {
+            pr_attached: true,
+            pr_url: Some(mr.url),
+            pr_number: Some(mr.iid),
+            pr_status: Some(status),
+            provider: Some(CodeHostProvider::Gitlab),
+        })));
+    }
+
+    Ok(ResponseJson(ApiResponse::success(AttachPrResponse {
+        pr_attached: false,
+        pr_url: None,
+        pr_number: None,
+        pr_status: None,
+        provider: Some(CodeHostProvider::Gitlab),
+    })))
 }
 
 pub async fn get_pr_comments(
@@ -518,34 +617,87 @@ pub async fn get_pr_comments(
         }
     };
 
-    let github_service = GitHubService::new()?;
-    let repo_info = deployment.git().get_github_repo_info(&repo.path)?;
+    // GitHub PR URLs use /pull/<n>, GitLab MRs use /-/merge_requests/<n>.
+    if pr_info.url.contains("/-/merge_requests/") {
+        let mr = GitLabMergeRequestRef::parse(&pr_info.url).map_err(|e| {
+            ApiError::BadRequest(format!("Invalid GitLab merge request URL: {e}"))
+        })?;
 
-    // Fetch comments from GitHub
-    match github_service
-        .get_pr_comments(&repo_info, pr_info.number)
-        .await
-    {
-        Ok(comments) => Ok(ResponseJson(ApiResponse::success(PrCommentsResponse {
-            comments,
-        }))),
-        Err(e) => {
-            tracing::error!(
-                "Failed to fetch PR comments for attempt {}, PR #{}: {}",
-                workspace.id,
-                pr_info.number,
-                e
-            );
-            match &e {
-                GitHubServiceError::GhCliNotInstalled(_) => Ok(ResponseJson(
-                    ApiResponse::error_with_data(GetPrCommentsError::GithubCliNotInstalled),
-                )),
-                GitHubServiceError::AuthFailed(_) => Ok(ResponseJson(
-                    ApiResponse::error_with_data(GetPrCommentsError::GithubCliNotLoggedIn),
-                )),
-                _ => Err(ApiError::GitHubService(e)),
+        let config = deployment.config().read().await;
+        let token = config
+            .gitlab
+            .token
+            .clone()
+            .or_else(|| std::env::var("GITLAB_TOKEN").ok());
+        let base_url = config.gitlab.base_url.clone().unwrap_or_else(|| mr.base_url.clone());
+        drop(config);
+
+        let Some(token) = token else {
+            return Ok(ResponseJson(ApiResponse::error_with_data(
+                GetPrCommentsError::GitlabTokenMissing,
+            )));
+        };
+
+        let gitlab = GitLabService::new(&base_url, &token).map_err(|e| {
+            ApiError::BadRequest(format!("Failed to initialize GitLab client: {e}"))
+        })?;
+
+        match gitlab.get_merge_request_comments(&mr).await {
+            Ok(comments) => Ok(ResponseJson(ApiResponse::success(PrCommentsResponse {
+                comments,
+            }))),
+            Err(GitLabServiceError::TokenMissing) => Ok(ResponseJson(ApiResponse::error_with_data(
+                GetPrCommentsError::GitlabTokenMissing,
+            ))),
+            Err(GitLabServiceError::InsufficientPermissions) => Ok(ResponseJson(
+                ApiResponse::error_with_data(GetPrCommentsError::InsufficientPermissions),
+            )),
+            Err(GitLabServiceError::NotFound) => Ok(ResponseJson(ApiResponse::error_with_data(
+                GetPrCommentsError::NotFound,
+            ))),
+            Err(e) => Err(ApiError::BadRequest(format!(
+                "Failed to fetch GitLab merge request comments: {e}"
+            ))),
+        }
+    } else if pr_info.url.contains("github.com/") || pr_info.url.contains("/pull/") {
+        let github_service = GitHubService::new()?;
+        let repo_info = deployment.git().get_github_repo_info(&repo.path)?;
+
+        match github_service
+            .get_pr_comments(&repo_info, pr_info.number)
+            .await
+        {
+            Ok(comments) => Ok(ResponseJson(ApiResponse::success(PrCommentsResponse {
+                comments,
+            }))),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to fetch PR comments for attempt {}, PR #{}: {}",
+                    workspace.id,
+                    pr_info.number,
+                    e
+                );
+                match &e {
+                    GitHubServiceError::GhCliNotInstalled(_) => Ok(ResponseJson(
+                        ApiResponse::error_with_data(GetPrCommentsError::GithubCliNotInstalled),
+                    )),
+                    GitHubServiceError::AuthFailed(_) => Ok(ResponseJson(
+                        ApiResponse::error_with_data(GetPrCommentsError::GithubCliNotLoggedIn),
+                    )),
+                    GitHubServiceError::InsufficientPermissions(_) => Ok(ResponseJson(
+                        ApiResponse::error_with_data(GetPrCommentsError::InsufficientPermissions),
+                    )),
+                    GitHubServiceError::RepoNotFoundOrNoAccess(_) => Ok(ResponseJson(
+                        ApiResponse::error_with_data(GetPrCommentsError::NotFound),
+                    )),
+                    _ => Err(ApiError::GitHubService(e)),
+                }
             }
         }
+    } else {
+        Ok(ResponseJson(ApiResponse::error_with_data(
+            GetPrCommentsError::UnsupportedProvider,
+        )))
     }
 }
 
@@ -616,36 +768,90 @@ pub async fn submit_pr_review_comments(
         });
     }
 
-    let github_service = GitHubService::new()?;
-    let repo_info = deployment.git().get_github_repo_info(&repo.path)?;
+    if pr_info.url.contains("/-/merge_requests/") {
+        let mr = GitLabMergeRequestRef::parse(&pr_info.url).map_err(|e| {
+            ApiError::BadRequest(format!("Invalid GitLab merge request URL: {e}"))
+        })?;
 
-    match github_service
-        .submit_pr_review_comments(&repo_info, pr_info.number, inputs)
-        .await
-    {
-        Ok(()) => Ok(ResponseJson(ApiResponse::success(()))),
-        Err(e) => {
-            tracing::error!(
-                "Failed to submit PR review comments for attempt {}, PR #{}: {}",
-                workspace.id,
-                pr_info.number,
-                e
-            );
-            match &e {
-                GitHubServiceError::GhCliNotInstalled(_) => Ok(ResponseJson(
-                    ApiResponse::error_with_data(SubmitPrReviewCommentsError::GithubCliNotInstalled),
-                )),
-                GitHubServiceError::AuthFailed(_) => Ok(ResponseJson(
-                    ApiResponse::error_with_data(SubmitPrReviewCommentsError::GithubCliNotLoggedIn),
-                )),
-                GitHubServiceError::InsufficientPermissions(_)
-                | GitHubServiceError::RepoNotFoundOrNoAccess(_) => Ok(ResponseJson(
-                    ApiResponse::error_with_data(
-                        SubmitPrReviewCommentsError::InsufficientPermissions,
-                    ),
-                )),
-                _ => Err(ApiError::GitHubService(e)),
+        let config = deployment.config().read().await;
+        let token = config
+            .gitlab
+            .token
+            .clone()
+            .or_else(|| std::env::var("GITLAB_TOKEN").ok());
+        let base_url = config.gitlab.base_url.clone().unwrap_or_else(|| mr.base_url.clone());
+        drop(config);
+
+        let Some(token) = token else {
+            return Ok(ResponseJson(ApiResponse::error_with_data(
+                SubmitPrReviewCommentsError::GitlabTokenMissing,
+            )));
+        };
+
+        let gitlab = GitLabService::new(&base_url, &token).map_err(|e| {
+            ApiError::BadRequest(format!("Failed to initialize GitLab client: {e}"))
+        })?;
+
+        let gitlab_inputs: Vec<CreateGitLabReviewCommentInput> = inputs
+            .into_iter()
+            .map(|c| CreateGitLabReviewCommentInput {
+                path: c.path,
+                line: c.line,
+                side: c.side,
+                body: c.body,
+            })
+            .collect();
+
+        match gitlab.submit_review_comments(&mr, gitlab_inputs).await {
+            Ok(()) => Ok(ResponseJson(ApiResponse::success(()))),
+            Err(GitLabServiceError::TokenMissing) => Ok(ResponseJson(ApiResponse::error_with_data(
+                SubmitPrReviewCommentsError::GitlabTokenMissing,
+            ))),
+            Err(GitLabServiceError::InsufficientPermissions) => Ok(ResponseJson(
+                ApiResponse::error_with_data(SubmitPrReviewCommentsError::InsufficientPermissions),
+            )),
+            Err(e) => Err(ApiError::BadRequest(format!(
+                "Failed to submit GitLab review comments: {e}"
+            ))),
+        }
+    } else if pr_info.url.contains("github.com/") || pr_info.url.contains("/pull/") {
+        let github_service = GitHubService::new()?;
+        let repo_info = deployment.git().get_github_repo_info(&repo.path)?;
+
+        match github_service
+            .submit_pr_review_comments(&repo_info, pr_info.number, inputs)
+            .await
+        {
+            Ok(()) => Ok(ResponseJson(ApiResponse::success(()))),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to submit PR review comments for attempt {}, PR #{}: {}",
+                    workspace.id,
+                    pr_info.number,
+                    e
+                );
+                match &e {
+                    GitHubServiceError::GhCliNotInstalled(_) => Ok(ResponseJson(
+                        ApiResponse::error_with_data(
+                            SubmitPrReviewCommentsError::GithubCliNotInstalled,
+                        ),
+                    )),
+                    GitHubServiceError::AuthFailed(_) => Ok(ResponseJson(
+                        ApiResponse::error_with_data(SubmitPrReviewCommentsError::GithubCliNotLoggedIn),
+                    )),
+                    GitHubServiceError::InsufficientPermissions(_)
+                    | GitHubServiceError::RepoNotFoundOrNoAccess(_) => Ok(ResponseJson(
+                        ApiResponse::error_with_data(
+                            SubmitPrReviewCommentsError::InsufficientPermissions,
+                        ),
+                    )),
+                    _ => Err(ApiError::GitHubService(e)),
+                }
             }
         }
+    } else {
+        Ok(ResponseJson(ApiResponse::error_with_data(
+            SubmitPrReviewCommentsError::UnsupportedProvider,
+        )))
     }
 }

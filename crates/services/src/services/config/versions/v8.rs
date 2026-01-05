@@ -17,6 +17,12 @@ fn default_pr_auto_description_enabled() -> bool {
     true
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, TS, Default)]
+pub struct GitLabConfig {
+    pub base_url: Option<String>,
+    pub token: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct Config {
     pub config_version: String,
@@ -27,6 +33,8 @@ pub struct Config {
     pub notifications: NotificationConfig,
     pub editor: EditorConfig,
     pub github: GitHubConfig,
+    #[serde(default)]
+    pub gitlab: GitLabConfig,
     pub analytics_enabled: bool,
     pub workspace_dir: Option<String>,
     pub last_app_version: Option<String>,
@@ -57,6 +65,7 @@ impl Config {
             notifications: old_config.notifications,
             editor: old_config.editor,
             github: old_config.github,
+            gitlab: GitLabConfig::default(),
             analytics_enabled,
             workspace_dir: old_config.workspace_dir,
             last_app_version: old_config.last_app_version,
@@ -107,6 +116,7 @@ impl Default for Config {
             notifications: NotificationConfig::default(),
             editor: EditorConfig::default(),
             github: GitHubConfig::default(),
+            gitlab: GitLabConfig::default(),
             analytics_enabled: true,
             workspace_dir: None,
             last_app_version: None,

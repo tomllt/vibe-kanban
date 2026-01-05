@@ -10,6 +10,7 @@ pub mod file_search_cache;
 pub mod filesystem;
 pub mod filesystem_watcher;
 pub mod git;
+pub mod gitlab;
 pub mod github;
 pub mod image;
 pub mod notification;
