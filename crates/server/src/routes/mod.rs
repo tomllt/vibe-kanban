@@ -5,6 +5,7 @@ use axum::{
 
 use crate::DeploymentImpl;
 
+pub mod analytics;
 pub mod approvals;
 pub mod config;
 pub mod containers;
@@ -30,6 +31,7 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
     // Create routers with different middleware layers
     let base_routes = Router::new()
         .route("/health", get(health::health_check))
+        .merge(analytics::router())
         .merge(config::router())
         .merge(containers::router(&deployment))
         .merge(projects::router(&deployment))

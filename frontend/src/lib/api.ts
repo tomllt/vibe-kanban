@@ -89,6 +89,11 @@ import {
   AbortConflictsRequest,
   Session,
   Workspace,
+  AnalyticsBucket,
+  BurndownResponse,
+  CfdResponse,
+  CycleTimeResponse,
+  DevExResponse,
 } from 'shared/types';
 import type { WorkspaceWithSession } from '@/types/attempt';
 import { createWorkspaceWithSession } from '@/types/attempt';
@@ -464,6 +469,83 @@ export const tasksApi = {
       body: JSON.stringify(data),
     });
     return handleApiResponse<Task | null>(response);
+  },
+};
+
+// Analytics APIs
+export const analyticsApi = {
+  getBurndown: async (params: {
+    projectId: string;
+    days?: number;
+    from?: string;
+    to?: string;
+    bucket?: AnalyticsBucket;
+    includeCancelled?: boolean;
+  }): Promise<BurndownResponse> => {
+    const qs = new URLSearchParams();
+    qs.set('project_id', params.projectId);
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.days != null) qs.set('days', String(params.days));
+    if (params.bucket) qs.set('bucket', params.bucket);
+    if (params.includeCancelled) qs.set('include_cancelled', 'true');
+
+    const response = await makeRequest(`/api/analytics/burndown?${qs}`);
+    return handleApiResponse<BurndownResponse>(response);
+  },
+
+  getCfd: async (params: {
+    projectId: string;
+    days?: number;
+    from?: string;
+    to?: string;
+    bucket?: AnalyticsBucket;
+  }): Promise<CfdResponse> => {
+    const qs = new URLSearchParams();
+    qs.set('project_id', params.projectId);
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.days != null) qs.set('days', String(params.days));
+    if (params.bucket) qs.set('bucket', params.bucket);
+
+    const response = await makeRequest(`/api/analytics/cfd?${qs}`);
+    return handleApiResponse<CfdResponse>(response);
+  },
+
+  getCycleTime: async (params: {
+    projectId: string;
+    days?: number;
+    from?: string;
+    to?: string;
+    bucket?: AnalyticsBucket;
+  }): Promise<CycleTimeResponse> => {
+    const qs = new URLSearchParams();
+    qs.set('project_id', params.projectId);
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.days != null) qs.set('days', String(params.days));
+    if (params.bucket) qs.set('bucket', params.bucket);
+
+    const response = await makeRequest(`/api/analytics/cycle-time?${qs}`);
+    return handleApiResponse<CycleTimeResponse>(response);
+  },
+
+  getDevEx: async (params: {
+    projectId: string;
+    days?: number;
+    from?: string;
+    to?: string;
+    bucket?: AnalyticsBucket;
+  }): Promise<DevExResponse> => {
+    const qs = new URLSearchParams();
+    qs.set('project_id', params.projectId);
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.days != null) qs.set('days', String(params.days));
+    if (params.bucket) qs.set('bucket', params.bucket);
+
+    const response = await makeRequest(`/api/analytics/devex?${qs}`);
+    return handleApiResponse<DevExResponse>(response);
   },
 };
 

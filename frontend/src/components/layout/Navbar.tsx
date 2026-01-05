@@ -19,6 +19,7 @@ import {
   Plus,
   LogOut,
   LogIn,
+  BarChart3,
 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import { SearchBar } from '@/components/SearchBar';
@@ -40,6 +41,7 @@ import {
 import { OAuthDialog } from '@/components/dialogs/global/OAuthDialog';
 import { useUserSystem } from '@/components/ConfigProvider';
 import { oauthApi } from '@/lib/api';
+import { paths } from '@/lib/paths';
 
 const INTERNAL_NAV = [{ label: 'Projects', icon: FolderOpen, to: '/projects' }];
 
@@ -219,6 +221,17 @@ export function Navbar() {
                       className="h-9 w-9"
                     />
                   )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9"
+                    asChild
+                    aria-label="Analytics"
+                  >
+                    <Link to={paths.projectAnalytics(projectId)}>
+                      <BarChart3 className="h-4 w-4" />
+                    </Link>
+                  </Button>
                   <Button
                     variant="ghost"
                     size="icon"
