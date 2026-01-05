@@ -62,9 +62,9 @@ export type UpdateTask = { title: string | null, description: string | null, sta
 
 export type DraftFollowUpData = { message: string, variant: string | null, };
 
-export type ScratchPayload = { "type": "DRAFT_TASK", "data": string } | { "type": "DRAFT_FOLLOW_UP", "data": DraftFollowUpData };
+export type ScratchPayload = { "type": "DRAFT_TASK", "data": string } | { "type": "DRAFT_FOLLOW_UP", "data": DraftFollowUpData } | { "type": "BACKLOG_GROOMING_DRAFT", "data": BacklogGroomingDraft };
 
-export enum ScratchType { DRAFT_TASK = "DRAFT_TASK", DRAFT_FOLLOW_UP = "DRAFT_FOLLOW_UP" }
+export enum ScratchType { DRAFT_TASK = "DRAFT_TASK", DRAFT_FOLLOW_UP = "DRAFT_FOLLOW_UP", BACKLOG_GROOMING_DRAFT = "BACKLOG_GROOMING_DRAFT" }
 
 export type Scratch = { id: string, payload: ScratchPayload, created_at: string, updated_at: string, };
 
@@ -443,6 +443,20 @@ export type DroidReasoningEffort = "none" | "dynamic" | "off" | "low" | "medium"
 
 export type AppendPrompt = string | null;
 
+export type BacklogGroomingDraft = { 
+/**
+ * A short list of testable outcomes.
+ */
+acceptance_criteria: Array<string>, 
+/**
+ * 3-5 atomic pieces of work.
+ */
+subtasks: Array<string>, 
+/**
+ * A story-point estimate (Fibonacci-ish: 1,2,3,5,8,13).
+ */
+story_points: number, };
+
 export type CodingAgentInitialRequest = { prompt: string, 
 /**
  * Executor profile specification
@@ -502,6 +516,12 @@ export type ToolStatus = { "status": "created" } | { "status": "success" } | { "
 export type PatchType = { "type": "NORMALIZED_ENTRY", "content": NormalizedEntry } | { "type": "STDOUT", "content": string } | { "type": "STDERR", "content": string } | { "type": "DIFF", "content": Diff };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]?: JsonValue } | null;
+
+export type BacklogGroomerGenerateRequest = { executor_profile_id?: ExecutorProfileId, };
+
+export type BacklogGroomerApplyRequest = { draft: BacklogGroomingDraft, };
+
+export type BacklogGroomerDraftResponse = { draft: BacklogGroomingDraft, };
 
 export const DEFAULT_PR_DESCRIPTION_PROMPT = `Update the GitHub PR that was just created with a better title and description.
 The PR number is #{pr_number} and the URL is {pr_url}.

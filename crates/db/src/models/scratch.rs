@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use executors::backlog_groomer::BacklogGroomingDraft;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use strum_macros::{Display, EnumDiscriminants, EnumString};
@@ -36,6 +37,7 @@ pub struct DraftFollowUpData {
 pub enum ScratchPayload {
     DraftTask(String),
     DraftFollowUp(DraftFollowUpData),
+    BacklogGroomingDraft(BacklogGroomingDraft),
 }
 
 impl ScratchPayload {

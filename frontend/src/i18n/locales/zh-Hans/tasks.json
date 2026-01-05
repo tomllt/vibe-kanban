@@ -329,7 +329,29 @@
     "share": "共享",
     "reassign": "重新分配",
     "stopShare": "停止共享",
+    "groomStory": "梳理故事",
     "duplicate": "复制"
+  },
+  "backlogGroomer": {
+    "title": "Backlog 梳理",
+    "description": "生成验收标准、子任务与故事点估算。",
+    "generate": "生成草稿",
+    "generating": "生成中...",
+    "regenerate": "重新生成",
+    "apply": "应用到任务",
+    "applying": "应用中...",
+    "errorGeneric": "Backlog 梳理失败，请重试。",
+    "emptyTitle": "暂无草稿",
+    "emptyBody": "根据故事标题生成草稿；可编辑后再应用。",
+    "generatedHint": "检查并编辑，然后应用。",
+    "storyPoints": "故事点",
+    "acceptanceCriteria": "验收标准",
+    "subtasks": "子任务",
+    "subtasksHint": "建议保持 3–5 条。",
+    "add": "添加",
+    "remove": "移除",
+    "itemPlaceholder": "写一条简短条目…",
+    "validationSubtasks": "应用前请保持 3–5 条子任务。"
   },
   "editBranchName": {
     "dialog": {

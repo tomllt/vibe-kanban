@@ -30,6 +30,7 @@ import { useTranslation } from 'react-i18next';
 import { useAttemptRepo } from '@/hooks/useAttemptRepo';
 import { useGitOperations } from '@/hooks/useGitOperations';
 import { useRepoBranches } from '@/hooks';
+import { useRepoMerges } from '@/hooks/useRepoMerges';
 
 interface GitOperationsProps {
   selectedAttempt: Workspace;
@@ -58,6 +59,14 @@ function GitOperations({
   const git = useGitOperations(selectedAttempt.id, selectedRepoId ?? undefined);
   const { data: branches = [] } = useRepoBranches(selectedRepoId);
   const isChangingTargetBranch = git.states.changeTargetBranchPending;
+  const resolvedRepoId = useMemo(
+    () => selectedRepoId ?? repos[0]?.id,
+    [selectedRepoId, repos]
+  );
+  const { merges: liveMerges, hasSnapshot: hasLiveMergesSnapshot } = useRepoMerges(
+    selectedAttempt.id,
+    resolvedRepoId
+  );
 
   // Local state for git operations
   const [merging, setMerging] = useState(false);
@@ -112,7 +121,10 @@ function GitOperations({
   // Memoize merge status information to avoid repeated calculations
   const mergeInfo = useMemo(() => {
     const selectedRepoStatus = getSelectedRepoStatus();
-    if (!selectedRepoStatus?.merges)
+    const merges = hasLiveMergesSnapshot
+      ? liveMerges
+      : selectedRepoStatus?.merges ?? [];
+    if (!merges)
       return {
         hasOpenPR: false,
         openPR: null,
@@ -122,15 +134,15 @@ function GitOperations({
         latestMerge: null,
       };
 
-    const openPR = selectedRepoStatus.merges.find(
+    const openPR = merges.find(
       (m: Merge) => m.type === 'pr' && m.pr_info.status === 'open'
     );
 
-    const mergedPR = selectedRepoStatus.merges.find(
+    const mergedPR = merges.find(
       (m: Merge) => m.type === 'pr' && m.pr_info.status === 'merged'
     );
 
-    const merges = selectedRepoStatus.merges.filter(
+    const completedMerges = merges.filter(
       (m: Merge) =>
         m.type === 'direct' ||
         (m.type === 'pr' && m.pr_info.status === 'merged')
@@ -141,10 +153,10 @@ function GitOperations({
       openPR,
       hasMergedPR: !!mergedPR,
       mergedPR,
-      hasMerged: merges.length > 0,
-      latestMerge: selectedRepoStatus.merges[0] || null, // Most recent merge
+      hasMerged: completedMerges.length > 0,
+      latestMerge: merges[0] || null, // Most recent merge
     };
-  }, [getSelectedRepoStatus]);
+  }, [getSelectedRepoStatus, hasLiveMergesSnapshot, liveMerges]);
 
   const mergeButtonLabel = useMemo(() => {
     if (mergeSuccess) return t('git.states.merged');

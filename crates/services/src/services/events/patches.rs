@@ -1,6 +1,8 @@
 use db::models::{
     execution_process::ExecutionProcess, project::Project, scratch::Scratch,
-    task::TaskWithAttemptStatus, workspace::Workspace,
+    task::TaskWithAttemptStatus,
+    workspace::Workspace,
+    merge::Merge,
 };
 use json_patch::{AddOperation, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
 use uuid::Uuid;
@@ -214,6 +216,50 @@ pub mod scratch_patch {
                 "payload": { "type": scratch_type_str },
                 "deleted": true
             }),
+        })])
+    }
+}
+
+/// Helper functions for creating merge-specific patches
+pub mod merge_patch {
+    use super::*;
+
+    fn merge_id(merge: &Merge) -> Uuid {
+        match merge {
+            Merge::Direct(d) => d.id,
+            Merge::Pr(p) => p.id,
+        }
+    }
+
+    fn merge_path(merge_id: Uuid) -> String {
+        format!("/merges/{}", escape_pointer_segment(&merge_id.to_string()))
+    }
+
+    pub fn add(merge: &Merge) -> Patch {
+        let id = merge_id(merge);
+        Patch(vec![PatchOperation::Add(AddOperation {
+            path: merge_path(id)
+                .try_into()
+                .expect("Merge path should be valid"),
+            value: serde_json::to_value(merge).expect("Merge serialization should not fail"),
+        })])
+    }
+
+    pub fn replace(merge: &Merge) -> Patch {
+        let id = merge_id(merge);
+        Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: merge_path(id)
+                .try_into()
+                .expect("Merge path should be valid"),
+            value: serde_json::to_value(merge).expect("Merge serialization should not fail"),
+        })])
+    }
+
+    pub fn remove(merge_id: Uuid) -> Patch {
+        Patch(vec![PatchOperation::Remove(RemoveOperation {
+            path: merge_path(merge_id)
+                .try_into()
+                .expect("Merge path should be valid"),
         })])
     }
 }

@@ -17,11 +17,13 @@ use db::models::{
     image::TaskImage,
     project::{Project, ProjectError},
     repo::Repo,
+    scratch::{Scratch, ScratchPayload, ScratchType, UpdateScratch},
     task::{CreateTask, Task, TaskWithAttemptStatus, UpdateTask},
     workspace::{CreateWorkspace, Workspace},
     workspace_repo::{CreateWorkspaceRepo, WorkspaceRepo},
 };
 use deployment::Deployment;
+use executors::backlog_groomer::{BacklogGroomer, BacklogGroomerError, BacklogGroomingDraft};
 use executors::profile::ExecutorProfileId;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -471,6 +473,272 @@ async fn promote_task_to_environment(
             Err(err)
         }
     }
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct BacklogGroomerGenerateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executor_profile_id: Option<ExecutorProfileId>,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct BacklogGroomerApplyRequest {
+    pub draft: BacklogGroomingDraft,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct BacklogGroomerDraftResponse {
+    pub draft: BacklogGroomingDraft,
+}
+
+fn is_minimal_story(task: &Task) -> bool {
+    let title = task.title.trim();
+    let desc_len = task
+        .description
+        .as_ref()
+        .map(|d| d.trim().chars().count())
+        .unwrap_or(0);
+
+    let looks_like_story = {
+        let lower = title.to_lowercase();
+        lower.starts_with("story:")
+            || lower.starts_with("user story:")
+            || lower.starts_with("[story]")
+            || lower.starts_with("as a ")
+            || lower.starts_with("as an ")
+    };
+
+    looks_like_story && desc_len < 60
+}
+
+fn render_grooming_markdown(draft: &BacklogGroomingDraft) -> String {
+    let ac = draft
+        .acceptance_criteria
+        .iter()
+        .map(|s| format!("- {s}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let subtasks = draft
+        .subtasks
+        .iter()
+        .map(|s| format!("- [ ] {s}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    [
+        "<!-- BACKLOG_GROOMER_START -->",
+        "## Story Points",
+        "",
+        &draft.story_points.to_string(),
+        "",
+        "## Acceptance Criteria",
+        "",
+        &ac,
+        "",
+        "## Subtasks",
+        "",
+        &subtasks,
+        "<!-- BACKLOG_GROOMER_END -->",
+        "",
+    ]
+    .join("\n")
+}
+
+fn upsert_backlog_section(existing: Option<String>, section: &str) -> Option<String> {
+    let Some(mut existing) = existing.filter(|s| !s.trim().is_empty()) else {
+        return Some(section.to_string());
+    };
+
+    let start = "<!-- BACKLOG_GROOMER_START -->";
+    let end = "<!-- BACKLOG_GROOMER_END -->";
+
+    if let (Some(s_idx), Some(e_idx)) = (existing.find(start), existing.find(end)) {
+        let end_idx = e_idx + end.len();
+        existing.replace_range(s_idx..end_idx, section.trim_end());
+        return Some(existing);
+    }
+
+    if !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    existing.push('\n');
+    existing.push_str(section);
+    Some(existing)
+}
+
+pub async fn get_backlog_grooming_draft(
+    Extension(task): Extension<Task>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<Option<BacklogGroomerDraftResponse>>>, ApiError> {
+    let scratch = Scratch::find_by_id(
+        &deployment.db().pool,
+        task.id,
+        &ScratchType::BacklogGroomingDraft,
+    )
+    .await?;
+
+    let Some(scratch) = scratch else {
+        return Ok(ResponseJson(ApiResponse::success(None)));
+    };
+
+    let ScratchPayload::BacklogGroomingDraft(draft) = scratch.payload else {
+        return Ok(ResponseJson(ApiResponse::success(None)));
+    };
+
+    Ok(ResponseJson(ApiResponse::success(Some(
+        BacklogGroomerDraftResponse { draft },
+    ))))
+}
+
+pub async fn generate_backlog_grooming(
+    Extension(task): Extension<Task>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<BacklogGroomerGenerateRequest>,
+) -> Result<ResponseJson<ApiResponse<BacklogGroomerDraftResponse>>, ApiError> {
+    if !is_minimal_story(&task) {
+        return Err(ApiError::BadRequest(
+            "Backlog grooming is only supported for story-like tasks with minimal description"
+                .to_string(),
+        ));
+    }
+
+    let configs = executors::profile::ExecutorConfigs::get_cached();
+    let executor_profile_id = match payload.executor_profile_id {
+        Some(id) => id,
+        None => match configs.get_recommended_executor_profile().await {
+            Ok(id) if matches!(id.executor, executors::executors::BaseCodingAgent::Codex) => {
+                ExecutorProfileId::with_variant(
+                    executors::executors::BaseCodingAgent::Codex,
+                    "BACKLOG_GROOMER".to_string(),
+                )
+            }
+            _ => ExecutorProfileId::with_variant(
+                executors::executors::BaseCodingAgent::Codex,
+                "BACKLOG_GROOMER".to_string(),
+            ),
+        },
+    };
+
+    let coding_agent = configs.get_coding_agent_or_default(&executor_profile_id);
+    let executors::executors::CodingAgent::Codex(mut codex) = coding_agent else {
+        return Err(ApiError::BadRequest(
+            "Backlog grooming currently supports only the CODEX executor".to_string(),
+        ));
+    };
+
+    // Ensure the backlog groomer variant is safe (no tool use / no approvals).
+    codex.include_apply_patch_tool = Some(false);
+    codex.sandbox = Some(executors::executors::codex::SandboxMode::ReadOnly);
+    codex.ask_for_approval = Some(executors::executors::codex::AskForApproval::Never);
+
+    let groomer = BacklogGroomer::default();
+    let env = executors::env::ExecutionEnv::default();
+    let story_text = task.to_prompt();
+
+    let draft = groomer
+        .generate_with_codex(&story_text, codex, &env)
+        .await
+        .map_err(|e| match e {
+            BacklogGroomerError::AuthRequired => ApiError::BadRequest(
+                "Codex authentication required (settings → connect Codex)".to_string(),
+            ),
+            BacklogGroomerError::Timeout => {
+                ApiError::Conflict("Backlog grooming timed out".to_string())
+            }
+            _ => ApiError::BadRequest(format!("Backlog grooming failed: {e}")),
+        })?;
+
+    // Store as scratch draft keyed by task id
+    let scratch = UpdateScratch {
+        payload: ScratchPayload::BacklogGroomingDraft(draft.clone()),
+    };
+    Scratch::update(
+        &deployment.db().pool,
+        task.id,
+        &ScratchType::BacklogGroomingDraft,
+        &scratch,
+    )
+    .await?;
+
+    Ok(ResponseJson(ApiResponse::success(BacklogGroomerDraftResponse {
+        draft,
+    })))
+}
+
+pub async fn apply_backlog_grooming(
+    Extension(existing_task): Extension<Task>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<BacklogGroomerApplyRequest>,
+) -> Result<ResponseJson<ApiResponse<Task>>, ApiError> {
+    ensure_shared_task_auth(&existing_task, &deployment).await?;
+
+    let draft = payload.draft.sanitize();
+    draft
+        .validate_strict()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let section = render_grooming_markdown(&draft);
+    let description = upsert_backlog_section(existing_task.description.clone(), &section);
+
+    let task = Task::update(
+        &deployment.db().pool,
+        existing_task.id,
+        existing_task.project_id,
+        existing_task.title.clone(),
+        description,
+        existing_task.status,
+        existing_task.parent_workspace_id,
+    )
+    .await?;
+
+    // If task has been shared, broadcast update
+    if task.shared_task_id.is_some() {
+        let Ok(publisher) = deployment.share_publisher() else {
+            return Err(ShareError::MissingConfig("share publisher unavailable").into());
+        };
+        publisher.update_shared_task(&task).await?;
+    }
+
+    Ok(ResponseJson(ApiResponse::success(task)))
+}
+
+#[cfg(test)]
+mod backlog_grooming_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn task(title: &str, description: Option<&str>) -> Task {
+        Task {
+            id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            title: title.to_string(),
+            description: description.map(|s| s.to_string()),
+            status: db::models::task::TaskStatus::Todo,
+            parent_workspace_id: None,
+            shared_task_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn minimal_story_detection_is_conservative() {
+        assert!(is_minimal_story(&task("Story: As a user, I can log in", None)));
+        assert!(!is_minimal_story(&task("Fix flaky test", None)));
+        assert!(!is_minimal_story(&task(
+            "Story: As a user, I can log in",
+            Some("Lots of context here that makes it no longer minimal. This should exceed the minimal threshold.")
+        )));
+    }
+
+    #[test]
+    fn upsert_replaces_existing_section() {
+        let existing = Some(
+            "Intro\n\n<!-- BACKLOG_GROOMER_START -->\nold\n<!-- BACKLOG_GROOMER_END -->\n\nOutro\n"
+                .to_string(),
+        );
+        let next = upsert_backlog_section(existing, "<!-- BACKLOG_GROOMER_START -->\nnew\n<!-- BACKLOG_GROOMER_END -->");
+        assert!(next.unwrap().contains("\nnew\n"));
+    }
 }
 
 async fn ensure_shared_task_auth(
@@ -644,7 +912,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
     let task_actions_router = Router::new()
         .route("/", put(update_task))
         .route("/", delete(delete_task))
-        .route("/share", post(share_task));
+        .route("/share", post(share_task))
+        .route("/backlog-grooming", get(get_backlog_grooming_draft))
+        .route("/backlog-grooming/generate", post(generate_backlog_grooming))
+        .route("/backlog-grooming/apply", post(apply_backlog_grooming));
 
     let task_id_router = Router::new()
         .route("/", get(get_task))
