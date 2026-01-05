@@ -252,6 +252,10 @@ export type RebaseTaskAttemptRequest = { repo_id: string, old_base_branch: strin
 
 export type AbortConflictsRequest = { repo_id: string, };
 
+export type ResolveConflictsRequest = { repo_id: string, };
+
+export type ResolveConflictsError = { "type": "no_conflicts" } | { "type": "process_already_running" } | { "type": "missing_executor_profile" };
+
 export type GitOperationError = { "type": "merge_conflicts", message: string, op: ConflictOp, } | { "type": "rebase_in_progress" };
 
 export type PushError = { "type": "force_push_required" };
@@ -352,7 +356,7 @@ export type McpConfig = { servers: { [key in string]?: JsonValue }, servers_path
 
 export type ExecutorActionType = { "type": "CodingAgentInitialRequest" } & CodingAgentInitialRequest | { "type": "CodingAgentFollowUpRequest" } & CodingAgentFollowUpRequest | { "type": "ScriptRequest" } & ScriptRequest;
 
-export type ScriptContext = "SetupScript" | "CleanupScript" | "DevServer" | "ToolInstallScript";
+export type ScriptContext = "SetupScript" | "CleanupScript" | "DevServer" | "ToolInstallScript" | "ConflictTests";
 
 export type ScriptRequest = { script: string, language: ScriptRequestLanguage, context: ScriptContext, 
 /**

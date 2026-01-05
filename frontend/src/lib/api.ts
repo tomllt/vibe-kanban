@@ -71,6 +71,8 @@ import {
   ListInvitationsResponse,
   OpenEditorResponse,
   OpenEditorRequest,
+  ResolveConflictsError,
+  ResolveConflictsRequest,
   CreatePrError,
   Scratch,
   ScratchType,
@@ -683,6 +685,22 @@ export const attemptsApi = {
       }
     );
     return handleApiResponse<void>(response);
+  },
+
+  resolveConflicts: async (
+    attemptId: string,
+    data: ResolveConflictsRequest
+  ): Promise<Result<ExecutionProcess, ResolveConflictsError>> => {
+    const response = await makeRequest(
+      `/api/task-attempts/${attemptId}/conflicts/resolve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponseAsResult<ExecutionProcess, ResolveConflictsError>(
+      response
+    );
   },
 
   createPR: async (
