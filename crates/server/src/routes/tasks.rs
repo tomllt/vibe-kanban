@@ -13,19 +13,25 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use db::models::{
+    environment_promotion::{EnvironmentPromotion, PromotionStatus, WorkflowEnvironment},
     image::TaskImage,
     project::{Project, ProjectError},
     repo::Repo,
+    scratch::{Scratch, ScratchPayload, ScratchType, UpdateScratch},
     task::{CreateTask, Task, TaskWithAttemptStatus, UpdateTask},
     workspace::{CreateWorkspace, Workspace},
     workspace_repo::{CreateWorkspaceRepo, WorkspaceRepo},
 };
 use deployment::Deployment;
+use executors::backlog_groomer::{BacklogGroomer, BacklogGroomerError, BacklogGroomingDraft};
 use executors::profile::ExecutorProfileId;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use services::services::{
-    container::ContainerService, share::ShareError, workspace_manager::WorkspaceManager,
+    container::ContainerService,
+    git::GitBranchKind,
+    share::ShareError,
+    workspace_manager::WorkspaceManager,
 };
 use sqlx::Error as SqlxError;
 use ts_rs::TS;
@@ -145,6 +151,9 @@ pub struct CreateAndStartTaskRequest {
     pub task: CreateTask,
     pub executor_profile_id: ExecutorProfileId,
     pub repos: Vec<WorkspaceRepoInput>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub branch_kind: Option<GitBranchKind>,
 }
 
 pub async fn create_task_and_start(
@@ -183,9 +192,10 @@ pub async fn create_task_and_start(
         .ok_or(ProjectError::ProjectNotFound)?;
 
     let attempt_id = Uuid::new_v4();
+    let branch_kind = payload.branch_kind.unwrap_or(GitBranchKind::Feature);
     let git_branch_name = deployment
         .container()
-        .git_branch_from_workspace(&attempt_id, &task.title)
+        .git_branch_from_workspace_with_kind(&attempt_id, &task.title, branch_kind)
         .await;
 
     let agent_working_dir = project
@@ -243,6 +253,7 @@ pub async fn create_task_and_start(
         has_in_progress_attempt: is_attempt_running,
         last_attempt_failed: false,
         executor: payload.executor_profile_id.executor.to_string(),
+        environment_promotions: None,
     })))
 }
 
@@ -253,6 +264,8 @@ pub async fn update_task(
     Json(payload): Json<UpdateTask>,
 ) -> Result<ResponseJson<ApiResponse<Task>>, ApiError> {
     ensure_shared_task_auth(&existing_task, &deployment).await?;
+
+    let old_status = existing_task.status.clone();
 
     // Use existing values if not provided in update
     let title = payload.title.unwrap_or(existing_task.title);
@@ -265,6 +278,31 @@ pub async fn update_task(
     let parent_workspace_id = payload
         .parent_workspace_id
         .or(existing_task.parent_workspace_id);
+
+    // If moving into Staging/Prod, optionally run workflow promotion first.
+    if old_status != status {
+        let workflow = deployment.config().read().await.workflow_automation.clone();
+        if workflow.enabled {
+            let env = match status {
+                db::models::task::TaskStatus::InReview => Some(WorkflowEnvironment::Staging),
+                db::models::task::TaskStatus::Done => Some(WorkflowEnvironment::Prod),
+                _ => None,
+            };
+
+            if let Some(environment) = env {
+                promote_task_to_environment(
+                    &deployment,
+                    existing_task.id,
+                    &title,
+                    description.as_deref(),
+                    old_status.clone(),
+                    environment,
+                    workflow,
+                )
+                .await?;
+            }
+        }
+    }
 
     let task = Task::update(
         &deployment.db().pool,
@@ -291,6 +329,416 @@ pub async fn update_task(
     }
 
     Ok(ResponseJson(ApiResponse::success(task)))
+}
+
+async fn promote_task_to_environment(
+    deployment: &DeploymentImpl,
+    task_id: Uuid,
+    title: &str,
+    description: Option<&str>,
+    current_status: db::models::task::TaskStatus,
+    environment: WorkflowEnvironment,
+    workflow: services::services::config::WorkflowAutomationConfig,
+) -> Result<(), ApiError> {
+    // Guardrails: only promote from a clean, idle workspace.
+    if deployment
+        .container()
+        .has_running_processes(task_id)
+        .await?
+    {
+        return Err(ApiError::Conflict(
+            "Task has running execution processes; stop them before promoting.".to_string(),
+        ));
+    }
+
+    let pool = &deployment.db().pool;
+    let workspaces = Workspace::fetch_all(pool, Some(task_id)).await?;
+    let workspace = workspaces.into_iter().next().ok_or_else(|| {
+        ApiError::Conflict("No attempt exists for this task; create an attempt first.".to_string())
+    })?;
+
+    let container_ref = deployment
+        .container()
+        .ensure_container_exists(&workspace)
+        .await?;
+    if !deployment.container().is_container_clean(&workspace).await? {
+        return Err(ApiError::Conflict(
+            "Attempt has uncommitted changes; commit or stash before promoting.".to_string(),
+        ));
+    }
+
+    let target_branch = match environment {
+        WorkflowEnvironment::Staging => workflow.staging_branch.clone(),
+        WorkflowEnvironment::Prod => workflow.prod_branch.clone(),
+    };
+
+    let repos = WorkspaceRepo::find_repos_with_target_branch_for_workspace(pool, workspace.id)
+        .await?
+        .into_iter()
+        .map(|r| r.repo)
+        .collect::<Vec<_>>();
+
+    if repos.is_empty() {
+        return Err(ApiError::Conflict(
+            "Attempt has no repositories attached; cannot promote.".to_string(),
+        ));
+    }
+
+    let task_uuid_str = task_id.to_string();
+    let short_id = task_uuid_str
+        .split('-')
+        .next()
+        .unwrap_or(&task_uuid_str)
+        .to_string();
+
+    let mut commit_message = format!(
+        "{title} (promote to {environment:?}) (vibe-kanban {short_id})"
+    );
+    if let Some(desc) = description.filter(|d| !d.trim().is_empty()) {
+        commit_message.push_str("\n\n");
+        commit_message.push_str(desc);
+    }
+
+    let workspace_path = PathBuf::from(container_ref);
+    let mut merged_commit: Option<String> = None;
+
+    let result: Result<(), ApiError> = async {
+        for repo in &repos {
+            // Ensure we have a local `target_branch` ref to update.
+            deployment
+                .git()
+                .sync_local_branch_with_default_remote(&repo.path, &target_branch)?;
+
+            let worktree_path = workspace_path.join(&repo.name);
+
+            let sha = deployment.git().merge_changes(
+                &repo.path,
+                &worktree_path,
+                &workspace.branch,
+                &target_branch,
+                &commit_message,
+            )?;
+
+            // Push the target branch to trigger CI/CD (works for GitHub and GitLab remotes).
+            if workflow.auto_push {
+                deployment.git().push_to_github(&repo.path, &target_branch, false)?;
+            }
+
+            if repos.len() == 1 {
+                merged_commit = Some(sha);
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    let promotion_id = Uuid::new_v4();
+    match result {
+        Ok(()) => {
+            let success_message = if workflow.auto_push {
+                format!("Merged and pushed to '{target_branch}'")
+            } else {
+                format!("Merged to '{target_branch}' (not pushed)")
+            };
+            EnvironmentPromotion::create(
+                pool,
+                promotion_id,
+                task_id,
+                Some(workspace.id),
+                environment,
+                PromotionStatus::Succeeded,
+                &target_branch,
+                merged_commit.as_deref(),
+                Some(&success_message),
+            )
+            .await?;
+            Ok(())
+        }
+        Err(err) => {
+            let err_message = err.to_string();
+            EnvironmentPromotion::create(
+                pool,
+                promotion_id,
+                task_id,
+                Some(workspace.id),
+                environment,
+                PromotionStatus::Failed,
+                &target_branch,
+                None,
+                Some(&err_message),
+            )
+            .await?;
+            // Trigger a task update event so clients can pick up the new promotion record.
+            Task::update_status(pool, task_id, current_status).await?;
+            Err(err)
+        }
+    }
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct BacklogGroomerGenerateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executor_profile_id: Option<ExecutorProfileId>,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct BacklogGroomerApplyRequest {
+    pub draft: BacklogGroomingDraft,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct BacklogGroomerDraftResponse {
+    pub draft: BacklogGroomingDraft,
+}
+
+fn is_minimal_story(task: &Task) -> bool {
+    let title = task.title.trim();
+    let desc_len = task
+        .description
+        .as_ref()
+        .map(|d| d.trim().chars().count())
+        .unwrap_or(0);
+
+    let looks_like_story = {
+        let lower = title.to_lowercase();
+        lower.starts_with("story:")
+            || lower.starts_with("user story:")
+            || lower.starts_with("[story]")
+            || lower.starts_with("as a ")
+            || lower.starts_with("as an ")
+    };
+
+    looks_like_story && desc_len < 60
+}
+
+fn render_grooming_markdown(draft: &BacklogGroomingDraft) -> String {
+    let ac = draft
+        .acceptance_criteria
+        .iter()
+        .map(|s| format!("- {s}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let subtasks = draft
+        .subtasks
+        .iter()
+        .map(|s| format!("- [ ] {s}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    [
+        "<!-- BACKLOG_GROOMER_START -->",
+        "## Story Points",
+        "",
+        &draft.story_points.to_string(),
+        "",
+        "## Acceptance Criteria",
+        "",
+        &ac,
+        "",
+        "## Subtasks",
+        "",
+        &subtasks,
+        "<!-- BACKLOG_GROOMER_END -->",
+        "",
+    ]
+    .join("\n")
+}
+
+fn upsert_backlog_section(existing: Option<String>, section: &str) -> Option<String> {
+    let Some(mut existing) = existing.filter(|s| !s.trim().is_empty()) else {
+        return Some(section.to_string());
+    };
+
+    let start = "<!-- BACKLOG_GROOMER_START -->";
+    let end = "<!-- BACKLOG_GROOMER_END -->";
+
+    if let (Some(s_idx), Some(e_idx)) = (existing.find(start), existing.find(end)) {
+        let end_idx = e_idx + end.len();
+        existing.replace_range(s_idx..end_idx, section.trim_end());
+        return Some(existing);
+    }
+
+    if !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    existing.push('\n');
+    existing.push_str(section);
+    Some(existing)
+}
+
+pub async fn get_backlog_grooming_draft(
+    Extension(task): Extension<Task>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<Option<BacklogGroomerDraftResponse>>>, ApiError> {
+    let scratch = Scratch::find_by_id(
+        &deployment.db().pool,
+        task.id,
+        &ScratchType::BacklogGroomingDraft,
+    )
+    .await?;
+
+    let Some(scratch) = scratch else {
+        return Ok(ResponseJson(ApiResponse::success(None)));
+    };
+
+    let ScratchPayload::BacklogGroomingDraft(draft) = scratch.payload else {
+        return Ok(ResponseJson(ApiResponse::success(None)));
+    };
+
+    Ok(ResponseJson(ApiResponse::success(Some(
+        BacklogGroomerDraftResponse { draft },
+    ))))
+}
+
+pub async fn generate_backlog_grooming(
+    Extension(task): Extension<Task>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<BacklogGroomerGenerateRequest>,
+) -> Result<ResponseJson<ApiResponse<BacklogGroomerDraftResponse>>, ApiError> {
+    if !is_minimal_story(&task) {
+        return Err(ApiError::BadRequest(
+            "Backlog grooming is only supported for story-like tasks with minimal description"
+                .to_string(),
+        ));
+    }
+
+    let configs = executors::profile::ExecutorConfigs::get_cached();
+    let executor_profile_id = match payload.executor_profile_id {
+        Some(id) => id,
+        None => match configs.get_recommended_executor_profile().await {
+            Ok(id) if matches!(id.executor, executors::executors::BaseCodingAgent::Codex) => {
+                ExecutorProfileId::with_variant(
+                    executors::executors::BaseCodingAgent::Codex,
+                    "BACKLOG_GROOMER".to_string(),
+                )
+            }
+            _ => ExecutorProfileId::with_variant(
+                executors::executors::BaseCodingAgent::Codex,
+                "BACKLOG_GROOMER".to_string(),
+            ),
+        },
+    };
+
+    let coding_agent = configs.get_coding_agent_or_default(&executor_profile_id);
+    let executors::executors::CodingAgent::Codex(mut codex) = coding_agent else {
+        return Err(ApiError::BadRequest(
+            "Backlog grooming currently supports only the CODEX executor".to_string(),
+        ));
+    };
+
+    // Ensure the backlog groomer variant is safe (no tool use / no approvals).
+    codex.include_apply_patch_tool = Some(false);
+    codex.sandbox = Some(executors::executors::codex::SandboxMode::ReadOnly);
+    codex.ask_for_approval = Some(executors::executors::codex::AskForApproval::Never);
+
+    let groomer = BacklogGroomer::default();
+    let env = executors::env::ExecutionEnv::default();
+    let story_text = task.to_prompt();
+
+    let draft = groomer
+        .generate_with_codex(&story_text, codex, &env)
+        .await
+        .map_err(|e| match e {
+            BacklogGroomerError::AuthRequired => ApiError::BadRequest(
+                "Codex authentication required (settings → connect Codex)".to_string(),
+            ),
+            BacklogGroomerError::Timeout => {
+                ApiError::Conflict("Backlog grooming timed out".to_string())
+            }
+            _ => ApiError::BadRequest(format!("Backlog grooming failed: {e}")),
+        })?;
+
+    // Store as scratch draft keyed by task id
+    let scratch = UpdateScratch {
+        payload: ScratchPayload::BacklogGroomingDraft(draft.clone()),
+    };
+    Scratch::update(
+        &deployment.db().pool,
+        task.id,
+        &ScratchType::BacklogGroomingDraft,
+        &scratch,
+    )
+    .await?;
+
+    Ok(ResponseJson(ApiResponse::success(BacklogGroomerDraftResponse {
+        draft,
+    })))
+}
+
+pub async fn apply_backlog_grooming(
+    Extension(existing_task): Extension<Task>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<BacklogGroomerApplyRequest>,
+) -> Result<ResponseJson<ApiResponse<Task>>, ApiError> {
+    ensure_shared_task_auth(&existing_task, &deployment).await?;
+
+    let draft = payload.draft.sanitize();
+    draft
+        .validate_strict()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let section = render_grooming_markdown(&draft);
+    let description = upsert_backlog_section(existing_task.description.clone(), &section);
+
+    let task = Task::update(
+        &deployment.db().pool,
+        existing_task.id,
+        existing_task.project_id,
+        existing_task.title.clone(),
+        description,
+        existing_task.status,
+        existing_task.parent_workspace_id,
+    )
+    .await?;
+
+    // If task has been shared, broadcast update
+    if task.shared_task_id.is_some() {
+        let Ok(publisher) = deployment.share_publisher() else {
+            return Err(ShareError::MissingConfig("share publisher unavailable").into());
+        };
+        publisher.update_shared_task(&task).await?;
+    }
+
+    Ok(ResponseJson(ApiResponse::success(task)))
+}
+
+#[cfg(test)]
+mod backlog_grooming_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn task(title: &str, description: Option<&str>) -> Task {
+        Task {
+            id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            title: title.to_string(),
+            description: description.map(|s| s.to_string()),
+            status: db::models::task::TaskStatus::Todo,
+            parent_workspace_id: None,
+            shared_task_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn minimal_story_detection_is_conservative() {
+        assert!(is_minimal_story(&task("Story: As a user, I can log in", None)));
+        assert!(!is_minimal_story(&task("Fix flaky test", None)));
+        assert!(!is_minimal_story(&task(
+            "Story: As a user, I can log in",
+            Some("Lots of context here that makes it no longer minimal. This should exceed the minimal threshold.")
+        )));
+    }
+
+    #[test]
+    fn upsert_replaces_existing_section() {
+        let existing = Some(
+            "Intro\n\n<!-- BACKLOG_GROOMER_START -->\nold\n<!-- BACKLOG_GROOMER_END -->\n\nOutro\n"
+                .to_string(),
+        );
+        let next = upsert_backlog_section(existing, "<!-- BACKLOG_GROOMER_START -->\nnew\n<!-- BACKLOG_GROOMER_END -->");
+        assert!(next.unwrap().contains("\nnew\n"));
+    }
 }
 
 async fn ensure_shared_task_auth(
@@ -464,7 +912,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
     let task_actions_router = Router::new()
         .route("/", put(update_task))
         .route("/", delete(delete_task))
-        .route("/share", post(share_task));
+        .route("/share", post(share_task))
+        .route("/backlog-grooming", get(get_backlog_grooming_draft))
+        .route("/backlog-grooming/generate", post(generate_backlog_grooming))
+        .route("/backlog-grooming/apply", post(apply_backlog_grooming));
 
     let task_id_router = Router::new()
         .route("/", get(get_task))

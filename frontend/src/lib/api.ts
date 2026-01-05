@@ -76,6 +76,9 @@ import {
   ScratchType,
   CreateScratch,
   UpdateScratch,
+  BacklogGroomerGenerateRequest,
+  BacklogGroomerApplyRequest,
+  BacklogGroomerDraftResponse,
   PushError,
   TokenResponse,
   CurrentUserResponse,
@@ -435,6 +438,41 @@ export const tasksApi = {
       method: 'POST',
     });
     return handleApiResponse<ShareTaskResponse>(response);
+  },
+
+  getBacklogGroomingDraft: async (
+    taskId: string
+  ): Promise<BacklogGroomerDraftResponse | null> => {
+    const response = await makeRequest(`/api/tasks/${taskId}/backlog-grooming`);
+    return handleApiResponse<BacklogGroomerDraftResponse | null>(response);
+  },
+
+  generateBacklogGrooming: async (
+    taskId: string,
+    data: BacklogGroomerGenerateRequest = {}
+  ): Promise<BacklogGroomerDraftResponse> => {
+    const response = await makeRequest(
+      `/api/tasks/${taskId}/backlog-grooming/generate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<BacklogGroomerDraftResponse>(response);
+  },
+
+  applyBacklogGrooming: async (
+    taskId: string,
+    data: BacklogGroomerApplyRequest
+  ): Promise<Task> => {
+    const response = await makeRequest(
+      `/api/tasks/${taskId}/backlog-grooming/apply`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<Task>(response);
   },
 
   reassign: async (

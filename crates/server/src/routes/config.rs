@@ -123,6 +123,18 @@ async fn update_config(
         ));
     }
 
+    // Validate workflow automation branches (even if disabled, keep config sane).
+    if !utils::git::is_valid_branch_name(&new_config.workflow_automation.staging_branch) {
+        return ResponseJson(ApiResponse::error(
+            "Invalid workflow staging branch. Must be a valid git branch name.",
+        ));
+    }
+    if !utils::git::is_valid_branch_name(&new_config.workflow_automation.prod_branch) {
+        return ResponseJson(ApiResponse::error(
+            "Invalid workflow prod branch. Must be a valid git branch name.",
+        ));
+    }
+
     // Get old config state before updating
     let old_config = deployment.config().read().await.clone();
 

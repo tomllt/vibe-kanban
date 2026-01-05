@@ -123,8 +123,8 @@
           "placeholder": "vk",
           "helper": "Prefijo para nombres de ramas generadas automáticamente. Dejar vacío para no usar prefijo.",
           "preview": "Vista previa:",
-          "previewWithPrefix": "{{prefix}}/1a2b-nombre-tarea",
-          "previewNoPrefix": "1a2b-nombre-tarea",
+          "previewWithPrefix": "{{prefix}}/feature/1a2b-nombre-tarea",
+          "previewNoPrefix": "feature/1a2b-nombre-tarea",
           "errors": {
             "slash": "El prefijo no puede contener '/'.",
             "startsWithDot": "El prefijo no puede comenzar con '.'.",
@@ -132,6 +132,19 @@
             "invalidSequence": "Contiene secuencia no válida (.., @{).",
             "invalidChars": "Contiene caracteres no válidos.",
             "controlChars": "Contiene caracteres de control."
+          }
+        },
+        "workflowAutomation": {
+          "title": "Automatización de flujo",
+          "description": "Cuando está habilitado, arrastrar tareas a Staging/Prod hará un squash-merge y opcionalmente push a las ramas configuradas.",
+          "enabled": {
+            "label": "Habilitar promoción por arrastre"
+          },
+          "stagingBranch": "Rama de staging",
+          "prodBranch": "Rama de producción",
+          "autoPush": {
+            "label": "Hacer push después del merge",
+            "helper": "El push dispara CI/CD en remotos de GitHub/GitLab."
           }
         }
       },

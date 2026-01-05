@@ -288,6 +288,60 @@ impl Merge {
 
         Ok(rows.into_iter().map(Into::into).collect())
     }
+
+    pub async fn find_by_rowid(pool: &SqlitePool, rowid: i64) -> Result<Option<Self>, sqlx::Error> {
+        let row = sqlx::query_as::<_, MergeRow>(
+            r#"SELECT
+                id,
+                workspace_id,
+                repo_id,
+                merge_type,
+                merge_commit,
+                pr_number,
+                pr_url,
+                pr_status,
+                pr_merged_at,
+                pr_merge_commit_sha,
+                created_at,
+                target_branch_name
+            FROM merges
+            WHERE rowid = ?"#,
+        )
+        .bind(rowid)
+        .fetch_optional(pool)
+        .await?;
+
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn find_pr_by_url(
+        pool: &SqlitePool,
+        pr_url: &str,
+    ) -> Result<Vec<PrMerge>, sqlx::Error> {
+        let rows = sqlx::query_as::<_, MergeRow>(
+            r#"SELECT
+                id,
+                workspace_id,
+                repo_id,
+                merge_type,
+                merge_commit,
+                pr_number,
+                pr_url,
+                pr_status,
+                pr_merged_at,
+                pr_merge_commit_sha,
+                created_at,
+                target_branch_name
+            FROM merges
+            WHERE merge_type = 'pr' AND pr_url = ?
+            ORDER BY created_at DESC"#,
+        )
+        .bind(pr_url)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows.into_iter().map(PrMerge::from).collect())
+    }
 }
 
 // Conversion implementations

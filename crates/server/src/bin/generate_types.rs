@@ -34,6 +34,9 @@ fn generate_types_content() -> String {
         db::models::task::Task::decl(),
         db::models::task::TaskWithAttemptStatus::decl(),
         db::models::task_status_event::TaskStatusEvent::decl(),
+        db::models::environment_promotion::WorkflowEnvironment::decl(),
+        db::models::environment_promotion::PromotionStatus::decl(),
+        db::models::environment_promotion::EnvironmentPromotion::decl(),
         db::models::task::TaskRelationships::decl(),
         db::models::task::CreateTask::decl(),
         db::models::task::UpdateTask::decl(),
@@ -153,6 +156,7 @@ fn generate_types_content() -> String {
         services::services::filesystem::DirectoryEntry::decl(),
         services::services::filesystem::DirectoryListResponse::decl(),
         services::services::config::Config::decl(),
+        services::services::config::WorkflowAutomationConfig::decl(),
         services::services::config::NotificationConfig::decl(),
         services::services::config::ThemeMode::decl(),
         services::services::config::EditorConfig::decl(),
@@ -163,6 +167,7 @@ fn generate_types_content() -> String {
         services::services::config::UiLanguage::decl(),
         services::services::config::ShowcaseState::decl(),
         services::services::git::GitBranch::decl(),
+        services::services::git::GitBranchKind::decl(),
         services::services::share::SharedTaskDetails::decl(),
         services::services::queued_message::QueuedMessage::decl(),
         services::services::queued_message::QueueStatus::decl(),
@@ -198,6 +203,7 @@ fn generate_types_content() -> String {
         executors::executors::droid::Autonomy::decl(),
         executors::executors::droid::ReasoningEffortLevel::decl(),
         executors::executors::AppendPrompt::decl(),
+        executors::backlog_groomer::BacklogGroomingDraft::decl(),
         executors::actions::coding_agent_initial::CodingAgentInitialRequest::decl(),
         executors::actions::coding_agent_follow_up::CodingAgentFollowUpRequest::decl(),
         executors::logs::CommandExitStatus::decl(),
@@ -213,6 +219,9 @@ fn generate_types_content() -> String {
         executors::logs::ToolStatus::decl(),
         executors::logs::utils::patch::PatchType::decl(),
         serde_json::Value::decl(),
+        server::routes::tasks::BacklogGroomerGenerateRequest::decl(),
+        server::routes::tasks::BacklogGroomerApplyRequest::decl(),
+        server::routes::tasks::BacklogGroomerDraftResponse::decl(),
     ];
 
     let body = decls
