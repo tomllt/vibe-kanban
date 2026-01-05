@@ -13,7 +13,7 @@ use utils::diff::{Diff, DiffChangeKind, FileDiffDetails, compute_line_change_cou
 mod cli;
 
 use cli::{ChangeType, StatusDiffEntry, StatusDiffOptions};
-pub use cli::{GitCli, GitCliError};
+pub use cli::{GitCli, GitCliError, StatusEntry, WorktreeStatus};
 
 use super::file_ranker::FileStat;
 use crate::services::github::GitHubRepoInfo;
@@ -56,6 +56,14 @@ pub enum ConflictOp {
     Merge,
     CherryPick,
     Revert,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename_all = "lowercase")]
+pub enum GitBranchKind {
+    Feature,
+    Hotfix,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -1523,6 +1531,122 @@ impl GitService {
             .map_err(|e| e.into())
     }
 
+    /// Fetch the given branch from the default remote into the local remote-tracking ref.
+    ///
+    /// This does not create a local branch; use `ensure_local_branch_exists` for that.
+    pub fn fetch_default_remote_branch(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Result<(), GitServiceError> {
+        let repo = self.open_repo(repo_path)?;
+        let default_remote_name = self.default_remote_name(&repo);
+        let normalized_branch = branch_name
+            .strip_prefix(&format!("{default_remote_name}/"))
+            .unwrap_or(branch_name);
+
+        let remote = repo.find_remote(&default_remote_name)?;
+        let remote_url = remote
+            .url()
+            .ok_or_else(|| GitServiceError::InvalidRepository("Remote has no URL".to_string()))?;
+
+        let refspec = format!(
+            "+refs/heads/{normalized_branch}:refs/remotes/{default_remote_name}/{normalized_branch}"
+        );
+        let git_cli = GitCli::new();
+        git_cli
+            .fetch_with_refspec(repo.path(), remote_url, &refspec)
+            .map_err(Into::into)
+    }
+
+    /// Ensure `branch_name` exists as a local branch, tracking the default remote if needed.
+    ///
+    /// Useful before operations that expect to update `refs/heads/<branch>`.
+    pub fn ensure_local_branch_exists(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Result<(), GitServiceError> {
+        let repo = self.open_repo(repo_path)?;
+        let default_remote_name = self.default_remote_name(&repo);
+        let normalized_branch = branch_name
+            .strip_prefix(&format!("{default_remote_name}/"))
+            .unwrap_or(branch_name);
+
+        if repo.find_branch(normalized_branch, BranchType::Local).is_ok() {
+            return Ok(());
+        }
+
+        // Ensure we have an up-to-date remote-tracking ref to branch from.
+        self.fetch_default_remote_branch(repo_path, normalized_branch)?;
+
+        let remote_branch_name = format!("{default_remote_name}/{normalized_branch}");
+        let remote_branch = repo
+            .find_branch(&remote_branch_name, BranchType::Remote)
+            .map_err(|_| GitServiceError::BranchNotFound(remote_branch_name.clone()))?;
+
+        let remote_commit = remote_branch.get().peel_to_commit()?;
+        repo.branch(normalized_branch, &remote_commit, false)?;
+
+        let mut local_branch = repo
+            .find_branch(normalized_branch, BranchType::Local)
+            .map_err(|_| GitServiceError::BranchNotFound(normalized_branch.to_string()))?;
+        local_branch.set_upstream(Some(&remote_branch_name))?;
+
+        Ok(())
+    }
+
+    /// Fetch the branch from the default remote and fast-forward the local branch if needed.
+    ///
+    /// If the local branch has diverged from the remote, this returns `BranchesDiverged`.
+    pub fn sync_local_branch_with_default_remote(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Result<(), GitServiceError> {
+        let repo = self.open_repo(repo_path)?;
+        let default_remote_name = self.default_remote_name(&repo);
+        let normalized_branch = branch_name
+            .strip_prefix(&format!("{default_remote_name}/"))
+            .unwrap_or(branch_name);
+
+        self.ensure_local_branch_exists(repo_path, normalized_branch)?;
+        self.fetch_default_remote_branch(repo_path, normalized_branch)?;
+
+        let local_ref = repo.find_reference(&format!("refs/heads/{normalized_branch}"))?;
+        let remote_ref = repo.find_reference(&format!(
+            "refs/remotes/{default_remote_name}/{normalized_branch}"
+        ))?;
+
+        let local_oid = local_ref.target().ok_or_else(|| {
+            GitServiceError::InvalidRepository(format!(
+                "Local branch '{normalized_branch}' has no target"
+            ))
+        })?;
+        let remote_oid = remote_ref.target().ok_or_else(|| {
+            GitServiceError::InvalidRepository(format!(
+                "Remote branch '{default_remote_name}/{normalized_branch}' has no target"
+            ))
+        })?;
+
+        let (ahead, behind) = repo.graph_ahead_behind(local_oid, remote_oid)?;
+        if ahead > 0 && behind > 0 {
+            return Err(GitServiceError::BranchesDiverged(format!(
+                "Local branch '{normalized_branch}' has diverged from '{default_remote_name}/{normalized_branch}'"
+            )));
+        }
+
+        if behind > 0 {
+            let mut local_ref = local_ref;
+            local_ref.set_target(
+                remote_oid,
+                &format!("fast-forward {normalized_branch} to {default_remote_name}"),
+            )?;
+        }
+
+        Ok(())
+    }
+
     pub fn rename_local_branch(
         &self,
         worktree_path: &Path,
@@ -1582,6 +1706,30 @@ impl GitService {
         git.get_conflicted_files(worktree_path).map_err(|e| {
             GitServiceError::InvalidRepository(format!("git diff for conflicts failed: {e}"))
         })
+    }
+
+    /// Return worktree status details via git CLI.
+    pub fn get_worktree_status(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<WorktreeStatus, GitServiceError> {
+        let git = GitCli::new();
+        git.get_worktree_status(worktree_path).map_err(|e| {
+            GitServiceError::InvalidRepository(format!("git status failed: {e}"))
+        })
+    }
+
+    /// Return a safe rollback ref for conflict resolution.
+    pub fn get_conflict_backup_ref(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<String, GitServiceError> {
+        let git = GitCli::new();
+        if let Ok(orig) = git.rev_parse(worktree_path, "ORIG_HEAD") {
+            return Ok(orig);
+        }
+        let head = self.get_head_info(worktree_path)?;
+        Ok(head.oid)
     }
 
     /// Abort an in-progress rebase in this worktree (no-op if none).

@@ -20,7 +20,42 @@ fn default_pr_auto_description_enabled() -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize, TS, Default)]
 pub struct GitLabConfig {
     pub base_url: Option<String>,
-    pub token: Option<String>,
+    pub token: Option<String>
+}
+
+fn default_workflow_staging_branch() -> String {
+    "staging".to_string()
+}
+
+fn default_workflow_prod_branch() -> String {
+    "main".to_string()
+}
+
+fn default_workflow_auto_push() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct WorkflowAutomationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_workflow_staging_branch")]
+    pub staging_branch: String,
+    #[serde(default = "default_workflow_prod_branch")]
+    pub prod_branch: String,
+    #[serde(default = "default_workflow_auto_push")]
+    pub auto_push: bool,
+}
+
+impl Default for WorkflowAutomationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            staging_branch: default_workflow_staging_branch(),
+            prod_branch: default_workflow_prod_branch(),
+            auto_push: default_workflow_auto_push(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -49,6 +84,8 @@ pub struct Config {
     pub pr_auto_description_enabled: bool,
     #[serde(default)]
     pub pr_auto_description_prompt: Option<String>,
+    #[serde(default)]
+    pub workflow_automation: WorkflowAutomationConfig,
 }
 
 impl Config {
@@ -75,6 +112,7 @@ impl Config {
             showcases: old_config.showcases,
             pr_auto_description_enabled: true,
             pr_auto_description_prompt: None,
+            workflow_automation: WorkflowAutomationConfig::default(),
         }
     }
 
@@ -126,6 +164,7 @@ impl Default for Config {
             showcases: ShowcaseState::default(),
             pr_auto_description_enabled: true,
             pr_auto_description_prompt: None,
+            workflow_automation: WorkflowAutomationConfig::default(),
         }
     }
 }

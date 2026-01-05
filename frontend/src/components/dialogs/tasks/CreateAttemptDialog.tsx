@@ -25,8 +25,15 @@ import { useUserSystem } from '@/components/ConfigProvider';
 import { paths } from '@/lib/paths';
 import NiceModal, { useModal } from '@ebay/nice-modal-react';
 import { defineModal } from '@/lib/modals';
-import type { ExecutorProfileId, BaseCodingAgent } from 'shared/types';
+import type { ExecutorProfileId, BaseCodingAgent, GitBranchKind } from 'shared/types';
 import { useKeySubmitTask, Scope } from '@/keyboard';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
 export interface CreateAttemptDialogProps {
   taskId: string;
@@ -50,6 +57,7 @@ const CreateAttemptDialogImpl = NiceModal.create<CreateAttemptDialogProps>(
 
     const [userSelectedProfile, setUserSelectedProfile] =
       useState<ExecutorProfileId | null>(null);
+    const [branchKind, setBranchKind] = useState<GitBranchKind>('feature');
 
     const { data: attempts = [], isLoading: isLoadingAttempts } =
       useTaskAttemptsWithSessions(taskId, {
@@ -94,6 +102,7 @@ const CreateAttemptDialogImpl = NiceModal.create<CreateAttemptDialogProps>(
     useEffect(() => {
       if (!modal.visible) {
         setUserSelectedProfile(null);
+        setBranchKind('feature');
         resetBranchSelection();
       }
     }, [modal.visible, resetBranchSelection]);
@@ -152,6 +161,7 @@ const CreateAttemptDialogImpl = NiceModal.create<CreateAttemptDialogProps>(
         await createAttempt({
           profile: effectiveProfile,
           repos,
+          branchKind,
         });
 
         modal.hide();
@@ -191,6 +201,28 @@ const CreateAttemptDialogImpl = NiceModal.create<CreateAttemptDialogProps>(
                 />
               </div>
             )}
+
+            <div className="space-y-2">
+              <div className="text-sm font-medium">
+                {t('createAttemptDialog.branchKind')}
+              </div>
+              <Select
+                value={branchKind}
+                onValueChange={(value) => setBranchKind(value as GitBranchKind)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="feature">
+                    {t('createAttemptDialog.branchKindFeature')}
+                  </SelectItem>
+                  <SelectItem value="hotfix">
+                    {t('createAttemptDialog.branchKindHotfix')}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
 
             <RepoBranchSelector
               configs={repoBranchConfigs}

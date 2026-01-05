@@ -37,6 +37,7 @@ import {
   useProjectRepos,
   useRepoBranchSelection,
 } from '@/hooks';
+import { useProjectTasks } from '@/hooks/useProjectTasks';
 import {
   useKeySubmitTask,
   useKeySubmitTaskAlt,
@@ -47,8 +48,10 @@ import { useHotkeysContext } from 'react-hotkeys-hook';
 import { cn } from '@/lib/utils';
 import type {
   TaskStatus,
+  TaskType,
   ExecutorProfileId,
   ImageResponse,
+  TaskWithAttemptStatus,
 } from 'shared/types';
 
 interface Task {
@@ -57,6 +60,13 @@ interface Task {
   title: string;
   description: string | null;
   status: TaskStatus;
+  sprint_id: string | null;
+  task_type: TaskType;
+  epic_id: string | null;
+  parent_task_id: string | null;
+  story_points: number | null;
+  parent_workspace_id: string | null;
+  shared_task_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -78,6 +88,10 @@ type TaskFormValues = {
   title: string;
   description: string;
   status: TaskStatus;
+  taskType: TaskType;
+  epicId: string | null;
+  parentTaskId: string | null;
+  storyPoints: string;
   executorProfileId: ExecutorProfileId | null;
   repoBranches: RepoBranch[];
   autoStart: boolean;
@@ -86,6 +100,7 @@ type TaskFormValues = {
 const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
   const { mode, projectId } = props;
   const editMode = mode === 'edit';
+  const isSubtask = mode === 'subtask';
   const modal = useModal();
   const { t } = useTranslation(['tasks', 'common']);
   const { createTask, createAndStart, updateTask } =
@@ -123,6 +138,28 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
       .map((c) => ({ repoId: c.repoId, branch: c.targetBranch! }));
   }, [repoBranchConfigs]);
 
+  const { tasks: projectTasks } = useProjectTasks(projectId);
+  const projectTasksById = useMemo(() => {
+    const map: Record<string, TaskWithAttemptStatus> = {};
+    for (const task of projectTasks) {
+      map[task.id] = task;
+    }
+    return map;
+  }, [projectTasks]);
+
+  const epicOptions = useMemo(
+    () => projectTasks.filter((task) => task.task_type === 'epic'),
+    [projectTasks]
+  );
+  const featureOptions = useMemo(
+    () => projectTasks.filter((task) => task.task_type === 'feature'),
+    [projectTasks]
+  );
+  const storyOptions = useMemo(
+    () => projectTasks.filter((task) => task.task_type === 'story'),
+    [projectTasks]
+  );
+
   // Get default form values based on mode
   const defaultValues = useMemo((): TaskFormValues => {
     const baseProfile = system.config?.executor_profile || null;
@@ -133,6 +170,11 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           title: props.task.title,
           description: props.task.description || '',
           status: props.task.status,
+          taskType: props.task.task_type,
+          epicId: props.task.epic_id,
+          parentTaskId: props.task.parent_task_id,
+          storyPoints:
+            props.task.story_points != null ? String(props.task.story_points) : '',
           executorProfileId: baseProfile,
           repoBranches: defaultRepoBranches,
           autoStart: false,
@@ -143,6 +185,13 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           title: props.initialTask.title,
           description: props.initialTask.description || '',
           status: 'todo',
+          taskType: props.initialTask.task_type,
+          epicId: props.initialTask.epic_id,
+          parentTaskId: props.initialTask.parent_task_id,
+          storyPoints:
+            props.initialTask.story_points != null
+              ? String(props.initialTask.story_points)
+              : '',
           executorProfileId: baseProfile,
           repoBranches: defaultRepoBranches,
           autoStart: true,
@@ -155,6 +204,10 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           title: '',
           description: '',
           status: 'todo',
+          taskType: 'task',
+          epicId: null,
+          parentTaskId: null,
+          storyPoints: '',
           executorProfileId: baseProfile,
           repoBranches: defaultRepoBranches,
           autoStart: true,
@@ -164,6 +217,11 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
 
   // Form submission handler
   const handleSubmit = async ({ value }: { value: TaskFormValues }) => {
+    const storyPoints =
+      value.storyPoints.trim() === '' ? null : Number(value.storyPoints);
+    const normalizedStoryPoints =
+      storyPoints == null || Number.isNaN(storyPoints) ? null : storyPoints;
+
     if (editMode) {
       await updateTask.mutateAsync(
         {
@@ -172,7 +230,12 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
             title: value.title,
             description: value.description,
             status: value.status,
-            parent_workspace_id: null,
+            sprint_id: props.task.sprint_id,
+            task_type: value.taskType,
+            epic_id: value.epicId,
+            parent_task_id: value.parentTaskId,
+            story_points: normalizedStoryPoints,
+            parent_workspace_id: props.task.parent_workspace_id,
             image_ids: images.length > 0 ? images.map((img) => img.id) : null,
           },
         },
@@ -181,11 +244,17 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
     } else {
       const imageIds =
         newlyUploadedImageIds.length > 0 ? newlyUploadedImageIds : null;
+      const taskType: TaskType = mode === 'subtask' ? 'task' : value.taskType;
       const task = {
         project_id: projectId,
         title: value.title,
         description: value.description,
         status: null,
+        sprint_id: null,
+        task_type: taskType,
+        epic_id: mode === 'subtask' ? null : value.epicId,
+        parent_task_id: mode === 'subtask' ? null : value.parentTaskId,
+        story_points: mode === 'subtask' ? null : normalizedStoryPoints,
         parent_workspace_id:
           mode === 'subtask' ? props.parentTaskAttemptId : null,
         image_ids: imageIds,
@@ -213,6 +282,25 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
 
   const validator = (value: TaskFormValues): string | undefined => {
     if (!value.title.trim().length) return 'need title';
+
+    if (mode === 'subtask' && value.taskType !== 'task') {
+      return 'subtasks must be type task';
+    }
+
+    if ((value.taskType === 'feature' || value.taskType === 'story') && !value.parentTaskId) {
+      return 'need parent task';
+    }
+
+    if (value.storyPoints.trim().length > 0) {
+      const points = Number(value.storyPoints);
+      if (!Number.isInteger(points) || points < 0) {
+        return 'story points must be a non-negative integer';
+      }
+      if (value.taskType === 'epic' || value.taskType === 'feature') {
+        return 'story points are only valid for stories/tasks';
+      }
+    }
+
     if (value.autoStart && !forceCreateOnlyRef.current) {
       if (!value.executorProfileId) return 'need executor profile';
       if (
@@ -239,6 +327,11 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
   const isSubmitting = useStore(form.store, (state) => state.isSubmitting);
   const isDirty = useStore(form.store, (state) => state.isDirty);
   const canSubmit = useStore(form.store, (state) => state.canSubmit);
+  const currentTaskType = useStore(form.store, (state) => state.values.taskType);
+  const currentParentTaskId = useStore(
+    form.store,
+    (state) => state.values.parentTaskId
+  );
 
   // Load images for edit mode
   useEffect(() => {
@@ -501,6 +594,220 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
                 )}
               </form.Field>
             )}
+
+            {!isSubtask ? (
+              <div className="pt-4 mt-4 border-t space-y-3">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <form.Field name="taskType">
+                    {(field) => (
+                      <div className="space-y-2">
+                        <Label className="text-sm font-medium">Type</Label>
+                        <Select
+                          value={field.state.value}
+                          onValueChange={(value) => {
+                            const nextType = value as TaskType;
+                            field.handleChange(nextType);
+                            if (nextType === 'epic') {
+                              form.setFieldValue('epicId', null);
+                              form.setFieldValue('parentTaskId', null);
+                              form.setFieldValue('storyPoints', '');
+                            } else if (nextType === 'feature') {
+                              form.setFieldValue('epicId', null);
+                              form.setFieldValue('parentTaskId', null);
+                              form.setFieldValue('storyPoints', '');
+                            } else if (nextType === 'story') {
+                              form.setFieldValue('epicId', null);
+                              form.setFieldValue('parentTaskId', null);
+                            }
+                          }}
+                          disabled={isSubmitting}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="task">Task</SelectItem>
+                            <SelectItem value="story">User story</SelectItem>
+                            <SelectItem value="feature">Feature</SelectItem>
+                            <SelectItem value="epic">Epic</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                  </form.Field>
+
+                  <form.Field name="storyPoints">
+                    {(field) => (
+                      <div className="space-y-2">
+                        <Label className="text-sm font-medium">
+                          Story points
+                        </Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={field.state.value}
+                          onChange={(e) => field.handleChange(e.target.value)}
+                          disabled={
+                            isSubmitting ||
+                            (currentTaskType !== 'story' &&
+                              currentTaskType !== 'task')
+                          }
+                          placeholder={
+                            currentTaskType === 'story' ||
+                            currentTaskType === 'task'
+                              ? 'e.g. 3'
+                              : 'N/A'
+                          }
+                        />
+                      </div>
+                    )}
+                  </form.Field>
+                </div>
+
+                {currentTaskType === 'feature' ? (
+                  <form.Field name="parentTaskId">
+                    {(field) => (
+                      <div className="space-y-2">
+                        <Label className="text-sm font-medium">Epic</Label>
+                        <Select
+                          value={field.state.value ?? 'none'}
+                          onValueChange={(value) => {
+                            const next = value === 'none' ? null : value;
+                            field.handleChange(next);
+                            form.setFieldValue('epicId', next);
+                          }}
+                          disabled={isSubmitting}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select an epic" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">None</SelectItem>
+                            {epicOptions.map((epic) => (
+                              <SelectItem key={epic.id} value={epic.id}>
+                                {epic.title}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                  </form.Field>
+                ) : null}
+
+                {currentTaskType === 'story' ? (
+                  <form.Field name="parentTaskId">
+                    {(field) => (
+                      <div className="space-y-2">
+                        <Label className="text-sm font-medium">Feature</Label>
+                        <Select
+                          value={field.state.value ?? 'none'}
+                          onValueChange={(value) => {
+                            const next = value === 'none' ? null : value;
+                            field.handleChange(next);
+                            if (next) {
+                              form.setFieldValue(
+                                'epicId',
+                                projectTasksById[next]?.epic_id ?? null
+                              );
+                            } else {
+                              form.setFieldValue('epicId', null);
+                            }
+                          }}
+                          disabled={isSubmitting}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select a feature" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">None</SelectItem>
+                            {featureOptions.map((feature) => (
+                              <SelectItem key={feature.id} value={feature.id}>
+                                {feature.title}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                  </form.Field>
+                ) : null}
+
+                {currentTaskType === 'task' ? (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <form.Field name="parentTaskId">
+                      {(field) => (
+                        <div className="space-y-2">
+                          <Label className="text-sm font-medium">
+                            Parent (optional)
+                          </Label>
+                          <Select
+                            value={field.state.value ?? 'none'}
+                            onValueChange={(value) => {
+                              const next = value === 'none' ? null : value;
+                              field.handleChange(next);
+                              if (next) {
+                                const parent = projectTasksById[next];
+                                form.setFieldValue('epicId', parent?.epic_id ?? null);
+                              }
+                            }}
+                            disabled={isSubmitting}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select parent" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">None</SelectItem>
+                              {featureOptions.map((feature) => (
+                                <SelectItem key={feature.id} value={feature.id}>
+                                  Feature: {feature.title}
+                                </SelectItem>
+                              ))}
+                              {storyOptions.map((story) => (
+                                <SelectItem key={story.id} value={story.id}>
+                                  Story: {story.title}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                    </form.Field>
+
+                    <form.Field name="epicId">
+                      {(field) => (
+                        <div className="space-y-2">
+                          <Label className="text-sm font-medium">
+                            Epic (optional)
+                          </Label>
+                          <Select
+                            value={field.state.value ?? 'none'}
+                            onValueChange={(value) => {
+                              const next = value === 'none' ? null : value;
+                              field.handleChange(next);
+                            }}
+                            disabled={isSubmitting || Boolean(currentParentTaskId)}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select epic" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">None</SelectItem>
+                              {epicOptions.map((epic) => (
+                                <SelectItem key={epic.id} value={epic.id}>
+                                  {epic.title}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                    </form.Field>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           {/* Create mode dropdowns */}

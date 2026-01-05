@@ -71,6 +71,8 @@ import {
   ListInvitationsResponse,
   OpenEditorResponse,
   OpenEditorRequest,
+  ResolveConflictsError,
+  ResolveConflictsRequest,
   CreatePrError,
   AttachExistingPrRequest,
   AttachPrResponse,
@@ -79,6 +81,9 @@ import {
   ScratchType,
   CreateScratch,
   UpdateScratch,
+  BacklogGroomerGenerateRequest,
+  BacklogGroomerApplyRequest,
+  BacklogGroomerDraftResponse,
   PushError,
   TokenResponse,
   CurrentUserResponse,
@@ -93,6 +98,12 @@ import {
   Session,
   Workspace,
   Diff,
+  Sprint,
+  CreateSprint,
+  UpdateSprint,
+  SprintPlanningTaskIds,
+  SprintPlanningUpdateResponse,
+  BacklogQuery,
 } from 'shared/types';
 import type { WorkspaceWithSession } from '@/types/attempt';
 import { createWorkspaceWithSession } from '@/types/attempt';
@@ -389,6 +400,75 @@ export const projectsApi = {
   },
 };
 
+export const sprintsApi = {
+  list: async (projectId: string): Promise<Sprint[]> => {
+    const response = await makeRequest(`/api/projects/${projectId}/sprints`);
+    return handleApiResponse<Sprint[]>(response);
+  },
+  create: async (
+    projectId: string,
+    data: CreateSprintRequest
+  ): Promise<Sprint> => {
+    const response = await makeRequest(`/api/projects/${projectId}/sprints`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<Sprint>(response);
+  },
+  update: async (
+    projectId: string,
+    sprintId: string,
+    data: UpdateSprintRequest
+  ): Promise<Sprint> => {
+    const response = await makeRequest(
+      `/api/projects/${projectId}/sprints/${sprintId}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<Sprint>(response);
+  },
+  delete: async (projectId: string, sprintId: string): Promise<void> => {
+    const response = await makeRequest(
+      `/api/projects/${projectId}/sprints/${sprintId}`,
+      { method: 'DELETE' }
+    );
+    await handleApiResponse<void>(response);
+  },
+  getReleaseNotes: async (
+    projectId: string,
+    sprintId: string
+  ): Promise<ReleaseNotesResponse> => {
+    const response = await makeRequest(
+      `/api/projects/${projectId}/sprints/${sprintId}/release-notes`
+    );
+    return handleApiResponse<ReleaseNotesResponse>(response);
+  },
+  downloadReleaseNotes: async (
+    projectId: string,
+    sprintId: string
+  ): Promise<Blob> => {
+    const response = await fetch(
+      `/api/projects/${projectId}/sprints/${sprintId}/release-notes?download=true`,
+      { headers: { Accept: 'text/markdown' } }
+    );
+
+    if (!response.ok) {
+      let errorMessage = `Request failed with status ${response.status}`;
+      try {
+        const errorData = await response.json();
+        if (errorData.message) errorMessage = errorData.message;
+      } catch {
+        errorMessage = response.statusText || errorMessage;
+      }
+      throw new ApiError(errorMessage, response.status, response);
+    }
+
+    return response.blob();
+  },
+};
+
 // Task Management APIs
 export const tasksApi = {
   getById: async (taskId: string): Promise<Task> => {
@@ -436,6 +516,41 @@ export const tasksApi = {
     return handleApiResponse<ShareTaskResponse>(response);
   },
 
+  getBacklogGroomingDraft: async (
+    taskId: string
+  ): Promise<BacklogGroomerDraftResponse | null> => {
+    const response = await makeRequest(`/api/tasks/${taskId}/backlog-grooming`);
+    return handleApiResponse<BacklogGroomerDraftResponse | null>(response);
+  },
+
+  generateBacklogGrooming: async (
+    taskId: string,
+    data: BacklogGroomerGenerateRequest = {}
+  ): Promise<BacklogGroomerDraftResponse> => {
+    const response = await makeRequest(
+      `/api/tasks/${taskId}/backlog-grooming/generate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<BacklogGroomerDraftResponse>(response);
+  },
+
+  applyBacklogGrooming: async (
+    taskId: string,
+    data: BacklogGroomerApplyRequest
+  ): Promise<Task> => {
+    const response = await makeRequest(
+      `/api/tasks/${taskId}/backlog-grooming/apply`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<Task>(response);
+  },
+
   reassign: async (
     sharedTaskId: string,
     data: { new_assignee_user_id: string | null }
@@ -468,6 +583,154 @@ export const tasksApi = {
       body: JSON.stringify(data),
     });
     return handleApiResponse<Task | null>(response);
+  },
+
+  backlog: async (
+    projectId: string,
+    params: Partial<Omit<BacklogQuery, 'project_id'>> = {}
+  ): Promise<TaskWithAttemptStatus[]> => {
+    const query = new URLSearchParams({
+      project_id: projectId,
+      ...(params.include_done ? { include_done: 'true' } : {}),
+      ...(params.include_cancelled ? { include_cancelled: 'true' } : {}),
+      ...(params.include_in_sprint ? { include_in_sprint: 'true' } : {}),
+    });
+
+    const response = await makeRequest(`/api/tasks/backlog?${query.toString()}`);
+    return handleApiResponse<TaskWithAttemptStatus[]>(response);
+  },
+};
+
+// Sprint APIs
+export const sprintsApi = {
+  list: async (projectId: string): Promise<Sprint[]> => {
+    const query = new URLSearchParams({ project_id: projectId });
+    const response = await makeRequest(`/api/sprints?${query.toString()}`);
+    return handleApiResponse<Sprint[]>(response);
+  },
+
+  create: async (data: CreateSprint): Promise<Sprint> => {
+    const response = await makeRequest(`/api/sprints`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<Sprint>(response);
+  },
+
+  update: async (sprintId: string, data: UpdateSprint): Promise<Sprint> => {
+    const response = await makeRequest(`/api/sprints/${sprintId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<Sprint>(response);
+  },
+
+  delete: async (sprintId: string): Promise<void> => {
+    const response = await makeRequest(`/api/sprints/${sprintId}`, {
+      method: 'DELETE',
+    });
+    return handleApiResponse<void>(response);
+  },
+
+  assign: async (
+    sprintId: string,
+    taskIds: string[]
+  ): Promise<SprintPlanningUpdateResponse> => {
+    const payload: SprintPlanningTaskIds = { task_ids: taskIds };
+    const response = await makeRequest(`/api/sprints/${sprintId}/assign`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return handleApiResponse<SprintPlanningUpdateResponse>(response);
+  },
+
+  unassign: async (
+    sprintId: string,
+    taskIds: string[]
+  ): Promise<SprintPlanningUpdateResponse> => {
+    const payload: SprintPlanningTaskIds = { task_ids: taskIds };
+    const response = await makeRequest(`/api/sprints/${sprintId}/unassign`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return handleApiResponse<SprintPlanningUpdateResponse>(response);
+  },
+};
+
+// Analytics APIs
+export const analyticsApi = {
+  getBurndown: async (params: {
+    projectId: string;
+    days?: number;
+    from?: string;
+    to?: string;
+    bucket?: AnalyticsBucket;
+    includeCancelled?: boolean;
+  }): Promise<BurndownResponse> => {
+    const qs = new URLSearchParams();
+    qs.set('project_id', params.projectId);
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.days != null) qs.set('days', String(params.days));
+    if (params.bucket) qs.set('bucket', params.bucket);
+    if (params.includeCancelled) qs.set('include_cancelled', 'true');
+
+    const response = await makeRequest(`/api/analytics/burndown?${qs}`);
+    return handleApiResponse<BurndownResponse>(response);
+  },
+
+  getCfd: async (params: {
+    projectId: string;
+    days?: number;
+    from?: string;
+    to?: string;
+    bucket?: AnalyticsBucket;
+  }): Promise<CfdResponse> => {
+    const qs = new URLSearchParams();
+    qs.set('project_id', params.projectId);
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.days != null) qs.set('days', String(params.days));
+    if (params.bucket) qs.set('bucket', params.bucket);
+
+    const response = await makeRequest(`/api/analytics/cfd?${qs}`);
+    return handleApiResponse<CfdResponse>(response);
+  },
+
+  getCycleTime: async (params: {
+    projectId: string;
+    days?: number;
+    from?: string;
+    to?: string;
+    bucket?: AnalyticsBucket;
+  }): Promise<CycleTimeResponse> => {
+    const qs = new URLSearchParams();
+    qs.set('project_id', params.projectId);
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.days != null) qs.set('days', String(params.days));
+    if (params.bucket) qs.set('bucket', params.bucket);
+
+    const response = await makeRequest(`/api/analytics/cycle-time?${qs}`);
+    return handleApiResponse<CycleTimeResponse>(response);
+  },
+
+  getDevEx: async (params: {
+    projectId: string;
+    days?: number;
+    from?: string;
+    to?: string;
+    bucket?: AnalyticsBucket;
+  }): Promise<DevExResponse> => {
+    const qs = new URLSearchParams();
+    qs.set('project_id', params.projectId);
+    if (params.from) qs.set('from', params.from);
+    if (params.to) qs.set('to', params.to);
+    if (params.days != null) qs.set('days', String(params.days));
+    if (params.bucket) qs.set('bucket', params.bucket);
+
+    const response = await makeRequest(`/api/analytics/devex?${qs}`);
+    return handleApiResponse<DevExResponse>(response);
   },
 };
 
@@ -705,6 +968,22 @@ export const attemptsApi = {
       }
     );
     return handleApiResponse<void>(response);
+  },
+
+  resolveConflicts: async (
+    attemptId: string,
+    data: ResolveConflictsRequest
+  ): Promise<Result<ExecutionProcess, ResolveConflictsError>> => {
+    const response = await makeRequest(
+      `/api/task-attempts/${attemptId}/conflicts/resolve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponseAsResult<ExecutionProcess, ResolveConflictsError>(
+      response
+    );
   },
 
   createPR: async (

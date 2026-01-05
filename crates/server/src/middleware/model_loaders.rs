@@ -1,4 +1,5 @@
 use axum::{
+    Extension,
     extract::{Path, Request, State},
     http::StatusCode,
     middleware::Next,
@@ -7,6 +8,7 @@ use axum::{
 use db::models::{
     execution_process::ExecutionProcess, project::Project, session::Session, tag::Tag, task::Task,
     workspace::Workspace,
+    sprint::Sprint,
 };
 use deployment::Deployment;
 use uuid::Uuid;
@@ -167,5 +169,28 @@ pub async fn load_session_middleware(
     };
 
     request.extensions_mut().insert(session);
+    Ok(next.run(request).await)
+}
+
+pub async fn load_sprint_middleware(
+    State(deployment): State<DeploymentImpl>,
+    Path(sprint_id): Path<Uuid>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let sprint = match Sprint::find_by_id(&deployment.db().pool, sprint_id).await {
+        Ok(Some(sprint)) => sprint,
+        Ok(None) => {
+            tracing::warn!("Sprint {} not found", sprint_id);
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch Sprint {}: {}", sprint_id, e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let mut request = request;
+    request.extensions_mut().insert(sprint);
     Ok(next.run(request).await)
 }

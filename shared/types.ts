@@ -42,23 +42,71 @@ export type CreateTag = { tag_name: string, content: string, };
 
 export type UpdateTag = { tag_name: string | null, content: string | null, };
 
+export type SprintStatus = "planned" | "active" | "closed";
+
+export type Sprint = { id: string, project_id: string, name: string, goal: string | null, start_date: string | null, end_date: string | null, status: SprintStatus, created_at: string, updated_at: string, };
+
+export type CreateSprint = { project_id: string, name: string, goal: string | null, start_date: string | null, end_date: string | null, status: SprintStatus | null, };
+
+export type UpdateSprint = { name: string | null, goal: string | null, start_date: string | null, end_date: string | null, status: SprintStatus | null, };
+
 export type TaskStatus = "todo" | "inprogress" | "inreview" | "done" | "cancelled";
 
-export type Task = { id: string, project_id: string, title: string, description: string | null, status: TaskStatus, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, };
+export type TaskType = "epic" | "feature" | "story" | "task";
 
-export type TaskWithAttemptStatus = { has_in_progress_attempt: boolean, last_attempt_failed: boolean, executor: string, id: string, project_id: string, title: string, description: string | null, status: TaskStatus, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, };
+export type Task = { id: string, project_id: string, title: string, description: string | null, status: TaskStatus, sprint_id: string | null, task_type: TaskType, epic_id: string | null, parent_task_id: string | null, story_points: number | null, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, };
+
+export type TaskWithAttemptStatus = { has_in_progress_attempt: boolean, last_attempt_failed: boolean, executor: string, id: string, project_id: string, title: string, description: string | null, status: TaskStatus, sprint_id: string | null, task_type: TaskType, epic_id: string | null, parent_task_id: string | null, story_points: number | null, parent_workspace_id: string | null, shared_task_id: string | null, created_at: string, updated_at: string, };
+
+export type WorkflowEnvironment = "staging" | "prod";
+
+export type PromotionStatus = "pending" | "succeeded" | "failed";
+
+export type EnvironmentPromotion = { id: string, task_id: string, workspace_id: string | null, environment: WorkflowEnvironment, status: PromotionStatus, target_branch: string, merge_commit_sha: string | null, message: string | null, created_at: string, updated_at: string, };
+
+export type TaskStatusEvent = { id: string, task_id: string, project_id: string, status: TaskStatus, created_at: Date, };
 
 export type TaskRelationships = { parent_task: Task | null, current_workspace: Workspace, children: Array<Task>, };
 
-export type CreateTask = { project_id: string, title: string, description: string | null, status: TaskStatus | null, parent_workspace_id: string | null, image_ids: Array<string> | null, shared_task_id: string | null, };
+export type CreateTask = { project_id: string, title: string, description: string | null, status: TaskStatus | null, sprint_id: string | null, task_type: TaskType | null, epic_id: string | null, parent_task_id: string | null, story_points: number | null, parent_workspace_id: string | null, image_ids: Array<string> | null, shared_task_id: string | null, };
 
-export type UpdateTask = { title: string | null, description: string | null, status: TaskStatus | null, parent_workspace_id: string | null, image_ids: Array<string> | null, };
+export type UpdateTask = { title: string | null, description: string | null, status: TaskStatus | null, sprint_id: string | null | null, task_type: TaskType | null, epic_id: string | null | null, parent_task_id: string | null | null, story_points: number | null | null, parent_workspace_id: string | null | null, image_ids: Array<string> | null, };
+
+export type AnalyticsBucket = "day";
+
+export type BurndownPoint = { ts: Date, remaining: bigint, total: bigint, };
+
+export type BurndownResponse = { points: Array<BurndownPoint>, };
+
+export type CfdPoint = { ts: Date, todo: bigint, inprogress: bigint, inreview: bigint, done: bigint, cancelled: bigint, };
+
+export type CfdResponse = { points: Array<CfdPoint>, };
+
+export type CycleTimeHistogramBucket = { 
+/**
+ * Inclusive lower bound (hours)
+ */
+from_hours: bigint, 
+/**
+ * Exclusive upper bound (hours)
+ */
+to_hours: bigint, count: bigint, };
+
+export type CycleTimeResponse = { sample_size: bigint, mean_hours: number, p50_hours: number, p75_hours: number, p90_hours: number, p95_hours: number, histogram: Array<CycleTimeHistogramBucket>, };
+
+export type AnalyticsPoint = { ts: Date, value: bigint, };
+
+export type FileHotspot = { path: string, commit_count: bigint, last_modified_at: Date, };
+
+export type RepoHotspots = { repo_id: string, repo_display_name: string, files: Array<FileHotspot>, };
+
+export type DevExResponse = { agent_turns: Array<AnalyticsPoint>, agent_runs: Array<AnalyticsPoint>, tasks_touched: bigint, hotspots: Array<RepoHotspots>, };
 
 export type DraftFollowUpData = { message: string, variant: string | null, };
 
-export type ScratchPayload = { "type": "DRAFT_TASK", "data": string } | { "type": "DRAFT_FOLLOW_UP", "data": DraftFollowUpData };
+export type ScratchPayload = { "type": "DRAFT_TASK", "data": string } | { "type": "DRAFT_FOLLOW_UP", "data": DraftFollowUpData } | { "type": "BACKLOG_GROOMING_DRAFT", "data": BacklogGroomingDraft };
 
-export enum ScratchType { DRAFT_TASK = "DRAFT_TASK", DRAFT_FOLLOW_UP = "DRAFT_FOLLOW_UP" }
+export enum ScratchType { DRAFT_TASK = "DRAFT_TASK", DRAFT_FOLLOW_UP = "DRAFT_FOLLOW_UP", BACKLOG_GROOMING_DRAFT = "BACKLOG_GROOMING_DRAFT" }
 
 export type Scratch = { id: string, payload: ScratchPayload, created_at: string, updated_at: string, };
 
@@ -184,6 +232,18 @@ export type InitRepoRequest = { parent_path: string, folder_name: string, };
 
 export type TagSearchParams = { search: string | null, };
 
+export type CreateSprintRequest = { name: string, start_at: string, end_at: string, };
+
+export type UpdateSprintRequest = { name: string | null, start_at: string | null, end_at: string | null, };
+
+export type ReleaseNotesQuery = { download: boolean | null, };
+
+export type ReleaseNotesTaskItem = { task: Task, pull_requests: Array<PullRequestInfo>, commits: Array<string>, };
+
+export type ReleaseNotesStats = { tasks_done: number, pull_requests: number, commits: number, };
+
+export type ReleaseNotesResponse = { sprint: Sprint, markdown: string, stats: ReleaseNotesStats, tasks: Array<ReleaseNotesTaskItem>, };
+
 export type TokenResponse = { access_token: string, expires_at: string | null, };
 
 export type UserSystemInfo = { config: Config, analytics_user_id: string, login_status: LoginStatus, environment: Environment, 
@@ -230,7 +290,15 @@ export type AssignSharedTaskRequest = { new_assignee_user_id: string | null, };
 
 export type ShareTaskResponse = { shared_task_id: string, };
 
+export type BacklogQuery = { project_id: string, include_done: boolean, include_cancelled: boolean, include_in_sprint: boolean, };
+
 export type CreateAndStartTaskRequest = { task: CreateTask, executor_profile_id: ExecutorProfileId, repos: Array<WorkspaceRepoInput>, };
+
+export type SprintQuery = { project_id: string, };
+
+export type SprintPlanningTaskIds = { task_ids: Array<string>, };
+
+export type SprintPlanningUpdateResponse = { updated_count: bigint, };
 
 export type CreateGitHubPrRequest = { title: string, body: string | null, target_branch: string | null, draft: boolean | null, repo_id: string, auto_generate_description: boolean, };
 
@@ -238,7 +306,7 @@ export type ImageResponse = { id: string, file_path: string, original_name: stri
 
 export type ImageMetadata = { exists: boolean, file_name: string | null, path: string | null, size_bytes: bigint | null, format: string | null, proxy_url: string | null, };
 
-export type CreateTaskAttemptBody = { task_id: string, executor_profile_id: ExecutorProfileId, repos: Array<WorkspaceRepoInput>, };
+export type CreateTaskAttemptBody = { task_id: string, executor_profile_id: ExecutorProfileId, repos: Array<WorkspaceRepoInput>, branch_kind?: GitBranchKind, };
 
 export type WorkspaceRepoInput = { repo_id: string, target_branch: string, };
 
@@ -251,6 +319,10 @@ export type GhCliSetupError = "BREW_MISSING" | "SETUP_HELPER_NOT_SUPPORTED" | { 
 export type RebaseTaskAttemptRequest = { repo_id: string, old_base_branch: string | null, new_base_branch: string | null, };
 
 export type AbortConflictsRequest = { repo_id: string, };
+
+export type ResolveConflictsRequest = { repo_id: string, };
+
+export type ResolveConflictsError = { "type": "no_conflicts" } | { "type": "process_already_running" } | { "type": "missing_executor_profile" };
 
 export type GitOperationError = { "type": "merge_conflicts", message: string, op: ConflictOp, } | { "type": "rebase_in_progress" };
 
@@ -308,7 +380,29 @@ export type DirectoryEntry = { name: string, path: string, is_directory: boolean
 
 export type DirectoryListResponse = { entries: Array<DirectoryEntry>, current_path: string, };
 
-export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, gitlab: GitLabConfig, analytics_enabled: boolean, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, showcases: ShowcaseState, pr_auto_description_enabled: boolean, pr_auto_description_prompt: string | null, };
+export type Config = {
+    config_version: string;
+    theme: ThemeMode;
+    executor_profile: ExecutorProfileId;
+    disclaimer_acknowledged: boolean;
+    onboarding_acknowledged: boolean;
+    notifications: NotificationConfig;
+    editor: EditorConfig;
+    github: GitHubConfig;
+    gitlab: GitLabConfig; // 仅在第一个版本中存在
+    analytics_enabled: boolean;
+    workspace_dir: string | null;
+    last_app_version: string | null;
+    show_release_notes: boolean;
+    language: UiLanguage;
+    git_branch_prefix: string;
+    showcases: ShowcaseState;
+    pr_auto_description_enabled: boolean;
+    pr_auto_description_prompt: string | null;
+    workflow_automation: WorkflowAutomationConfig; // 仅在第二个版本中存在
+};
+
+export type WorkflowAutomationConfig = { enabled: boolean, staging_branch: string, prod_branch: string, auto_push: boolean, };
 
 export type NotificationConfig = { sound_enabled: boolean, push_enabled: boolean, sound_file: SoundFile, };
 
@@ -331,6 +425,8 @@ export type UiLanguage = "BROWSER" | "EN" | "JA" | "ES" | "KO" | "ZH_HANS";
 export type ShowcaseState = { seen_features: Array<string>, };
 
 export type GitBranch = { name: string, is_current: boolean, is_remote: boolean, last_commit_date: Date, };
+
+export type GitBranchKind = "feature" | "hotfix";
 
 export type SharedTaskDetails = { id: string, project_id: string, title: string, description: string | null, status: TaskStatus, };
 
@@ -358,7 +454,7 @@ export type McpConfig = { servers: { [key in string]?: JsonValue }, servers_path
 
 export type ExecutorActionType = { "type": "CodingAgentInitialRequest" } & CodingAgentInitialRequest | { "type": "CodingAgentFollowUpRequest" } & CodingAgentFollowUpRequest | { "type": "ScriptRequest" } & ScriptRequest;
 
-export type ScriptContext = "SetupScript" | "CleanupScript" | "DevServer" | "ToolInstallScript";
+export type ScriptContext = "SetupScript" | "CleanupScript" | "DevServer" | "ToolInstallScript" | "ConflictTests";
 
 export type ScriptRequest = { script: string, language: ScriptRequestLanguage, context: ScriptContext, 
 /**
@@ -439,6 +535,20 @@ export type DroidReasoningEffort = "none" | "dynamic" | "off" | "low" | "medium"
 
 export type AppendPrompt = string | null;
 
+export type BacklogGroomingDraft = { 
+/**
+ * A short list of testable outcomes.
+ */
+acceptance_criteria: Array<string>, 
+/**
+ * 3-5 atomic pieces of work.
+ */
+subtasks: Array<string>, 
+/**
+ * A story-point estimate (Fibonacci-ish: 1,2,3,5,8,13).
+ */
+story_points: number, };
+
 export type CodingAgentInitialRequest = { prompt: string, 
 /**
  * Executor profile specification
@@ -498,6 +608,12 @@ export type ToolStatus = { "status": "created" } | { "status": "success" } | { "
 export type PatchType = { "type": "NORMALIZED_ENTRY", "content": NormalizedEntry } | { "type": "STDOUT", "content": string } | { "type": "STDERR", "content": string } | { "type": "DIFF", "content": Diff };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]?: JsonValue } | null;
+
+export type BacklogGroomerGenerateRequest = { executor_profile_id?: ExecutorProfileId, };
+
+export type BacklogGroomerApplyRequest = { draft: BacklogGroomingDraft, };
+
+export type BacklogGroomerDraftResponse = { draft: BacklogGroomingDraft, };
 
 export const DEFAULT_PR_DESCRIPTION_PROMPT = `Update the GitHub PR that was just created with a better title and description.
 The PR number is #{pr_number} and the URL is {pr_url}.

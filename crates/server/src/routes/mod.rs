@@ -5,6 +5,7 @@ use axum::{
 
 use crate::DeploymentImpl;
 
+pub mod analytics;
 pub mod approvals;
 pub mod config;
 pub mod containers;
@@ -15,6 +16,7 @@ pub mod execution_processes;
 pub mod frontend;
 pub mod health;
 pub mod images;
+pub mod merges;
 pub mod oauth;
 pub mod organizations;
 pub mod projects;
@@ -22,21 +24,26 @@ pub mod repo;
 pub mod scratch;
 pub mod sessions;
 pub mod shared_tasks;
+pub mod sprints;
 pub mod tags;
 pub mod task_attempts;
 pub mod tasks;
+pub mod webhooks;
 
 pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
     // Create routers with different middleware layers
     let base_routes = Router::new()
         .route("/health", get(health::health_check))
+        .merge(analytics::router())
         .merge(config::router())
         .merge(containers::router(&deployment))
         .merge(projects::router(&deployment))
         .merge(tasks::router(&deployment))
+        .merge(sprints::router(&deployment))
         .merge(shared_tasks::router())
         .merge(task_attempts::router(&deployment))
         .merge(execution_processes::router(&deployment))
+        .merge(merges::router(&deployment))
         .merge(tags::router(&deployment))
         .merge(oauth::router())
         .merge(organizations::router())
@@ -46,6 +53,7 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .merge(approvals::router())
         .merge(scratch::router(&deployment))
         .merge(sessions::router(&deployment))
+        .merge(webhooks::router())
         .nest("/images", images::routes())
         .with_state(deployment);
 

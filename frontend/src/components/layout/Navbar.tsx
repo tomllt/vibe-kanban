@@ -17,8 +17,11 @@ import {
   MessageCircle,
   Menu,
   Plus,
+  CalendarDays,
+  ListTodo,
   LogOut,
   LogIn,
+  BarChart3,
 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import { SearchBar } from '@/components/SearchBar';
@@ -40,6 +43,7 @@ import {
 import { OAuthDialog } from '@/components/dialogs/global/OAuthDialog';
 import { useUserSystem } from '@/components/ConfigProvider';
 import { oauthApi } from '@/lib/api';
+import { paths } from '@/lib/paths';
 
 const INTERNAL_NAV = [{ label: 'Projects', icon: FolderOpen, to: '/projects' }];
 
@@ -92,6 +96,9 @@ export function Navbar() {
   const { t } = useTranslation(['tasks', 'common']);
   // Navbar is global, but the share tasks toggle only makes sense on the tasks route
   const isTasksRoute = /^\/projects\/[^/]+\/tasks/.test(location.pathname);
+  const isBacklogRoute = /^\/projects\/[^/]+\/backlog/.test(location.pathname);
+  const isSprintPlanningRoute =
+    /^\/projects\/[^/]+\/sprint-planning/.test(location.pathname);
   const showSharedTasks = searchParams.get('shared') !== 'off';
   const shouldShowSharedToggle =
     isTasksRoute && active && project?.remote_project_id != null;
@@ -213,12 +220,45 @@ export function Navbar() {
             {projectId ? (
               <>
                 <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={`h-9 ${isBacklogRoute ? 'bg-accent' : ''}`}
+                    asChild
+                  >
+                    <Link to={paths.projectBacklog(projectId)}>
+                      <ListTodo className="h-4 w-4 mr-2" />
+                      Backlog
+                    </Link>
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={`h-9 ${isSprintPlanningRoute ? 'bg-accent' : ''}`}
+                    asChild
+                  >
+                    <Link to={paths.projectSprintPlanning(projectId)}>
+                      <CalendarDays className="h-4 w-4 mr-2" />
+                      Sprint
+                    </Link>
+                  </Button>
                   {isSingleRepoProject && (
                     <OpenInIdeButton
                       onClick={handleOpenInIDE}
                       className="h-9 w-9"
                     />
                   )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9"
+                    asChild
+                    aria-label="Analytics"
+                  >
+                    <Link to={paths.projectAnalytics(projectId)}>
+                      <BarChart3 className="h-4 w-4" />
+                    </Link>
+                  </Button>
                   <Button
                     variant="ghost"
                     size="icon"
