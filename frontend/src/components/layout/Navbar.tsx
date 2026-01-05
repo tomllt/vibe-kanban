@@ -17,6 +17,8 @@ import {
   MessageCircle,
   Menu,
   Plus,
+  CalendarDays,
+  ListTodo,
   LogOut,
   LogIn,
   BarChart3,
@@ -94,6 +96,9 @@ export function Navbar() {
   const { t } = useTranslation(['tasks', 'common']);
   // Navbar is global, but the share tasks toggle only makes sense on the tasks route
   const isTasksRoute = /^\/projects\/[^/]+\/tasks/.test(location.pathname);
+  const isBacklogRoute = /^\/projects\/[^/]+\/backlog/.test(location.pathname);
+  const isSprintPlanningRoute =
+    /^\/projects\/[^/]+\/sprint-planning/.test(location.pathname);
   const showSharedTasks = searchParams.get('shared') !== 'off';
   const shouldShowSharedToggle =
     isTasksRoute && active && project?.remote_project_id != null;
@@ -215,6 +220,28 @@ export function Navbar() {
             {projectId ? (
               <>
                 <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={`h-9 ${isBacklogRoute ? 'bg-accent' : ''}`}
+                    asChild
+                  >
+                    <Link to={paths.projectBacklog(projectId)}>
+                      <ListTodo className="h-4 w-4 mr-2" />
+                      Backlog
+                    </Link>
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={`h-9 ${isSprintPlanningRoute ? 'bg-accent' : ''}`}
+                    asChild
+                  >
+                    <Link to={paths.projectSprintPlanning(projectId)}>
+                      <CalendarDays className="h-4 w-4 mr-2" />
+                      Sprint
+                    </Link>
+                  </Button>
                   {isSingleRepoProject && (
                     <OpenInIdeButton
                       onClick={handleOpenInIDE}

@@ -17,8 +17,8 @@ use db::models::{
     image::TaskImage,
     project::{Project, ProjectError},
     repo::Repo,
-    scratch::{Scratch, ScratchPayload, ScratchType, UpdateScratch},
-    task::{CreateTask, Task, TaskWithAttemptStatus, UpdateTask},
+    sprint::Sprint,
+    task::{CreateTask, Task, TaskType, TaskWithAttemptStatus, UpdateTask, UpdateTaskData},
     workspace::{CreateWorkspace, Workspace},
     workspace_repo::{CreateWorkspaceRepo, WorkspaceRepo},
 };
@@ -55,6 +55,51 @@ pub async fn get_tasks(
     let tasks =
         Task::find_by_project_id_with_attempt_status(&deployment.db().pool, query.project_id)
             .await?;
+
+    Ok(ResponseJson(ApiResponse::success(tasks)))
+}
+
+#[derive(Debug, Deserialize, TS)]
+pub struct BacklogQuery {
+    pub project_id: Uuid,
+    #[serde(default)]
+    pub include_done: bool,
+    #[serde(default)]
+    pub include_cancelled: bool,
+    #[serde(default)]
+    pub include_in_sprint: bool,
+}
+
+pub async fn get_backlog(
+    State(deployment): State<DeploymentImpl>,
+    Query(query): Query<BacklogQuery>,
+) -> Result<ResponseJson<ApiResponse<Vec<TaskWithAttemptStatus>>>, ApiError> {
+    let mut tasks =
+        Task::find_by_project_id_with_attempt_status(&deployment.db().pool, query.project_id)
+            .await?;
+
+    if !query.include_in_sprint {
+        tasks.retain(|t| t.sprint_id.is_none());
+    }
+
+    if !query.include_done {
+        tasks.retain(|t| t.status != db::models::task::TaskStatus::Done);
+    }
+
+    if !query.include_cancelled {
+        tasks.retain(|t| t.status != db::models::task::TaskStatus::Cancelled);
+    }
+
+    tasks.sort_by(|a, b| {
+        // "epic" first, then feature, story, task.
+        let rank = |t: &TaskWithAttemptStatus| match t.task_type {
+            TaskType::Epic => 0,
+            TaskType::Feature => 1,
+            TaskType::Story => 2,
+            TaskType::Task => 3,
+        };
+        rank(a).cmp(&rank(b)).then_with(|| b.created_at.cmp(&a.created_at))
+    });
 
     Ok(ResponseJson(ApiResponse::success(tasks)))
 }
@@ -115,7 +160,7 @@ pub async fn get_task(
 
 pub async fn create_task(
     State(deployment): State<DeploymentImpl>,
-    Json(payload): Json<CreateTask>,
+    Json(mut payload): Json<CreateTask>,
 ) -> Result<ResponseJson<ApiResponse<Task>>, ApiError> {
     let id = Uuid::new_v4();
 
@@ -124,6 +169,25 @@ pub async fn create_task(
         payload.title,
         payload.project_id
     );
+
+    let task_type = payload.task_type.clone().unwrap_or_default();
+    let (sprint_id, epic_id, parent_task_id, story_points) =
+        validate_and_normalize_agile_fields(
+            &deployment.db().pool,
+            payload.project_id,
+            task_type.clone(),
+            payload.sprint_id,
+            payload.epic_id,
+            payload.parent_task_id,
+            payload.story_points,
+        )
+        .await?;
+
+    payload.sprint_id = sprint_id;
+    payload.task_type = Some(task_type);
+    payload.epic_id = epic_id;
+    payload.parent_task_id = parent_task_id;
+    payload.story_points = story_points;
 
     let task = Task::create(&deployment.db().pool, &payload, id).await?;
 
@@ -160,7 +224,13 @@ pub async fn create_task_and_start(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<CreateAndStartTaskRequest>,
 ) -> Result<ResponseJson<ApiResponse<TaskWithAttemptStatus>>, ApiError> {
-    if payload.repos.is_empty() {
+    let CreateAndStartTaskRequest {
+        task,
+        executor_profile_id,
+        repos,
+    } = payload;
+
+    if repos.is_empty() {
         return Err(ApiError::BadRequest(
             "At least one repository is required".to_string(),
         ));
@@ -169,9 +239,28 @@ pub async fn create_task_and_start(
     let pool = &deployment.db().pool;
 
     let task_id = Uuid::new_v4();
-    let task = Task::create(pool, &payload.task, task_id).await?;
+    let mut task_payload = task;
+    let task_type = task_payload.task_type.clone().unwrap_or_default();
+    let (sprint_id, epic_id, parent_task_id, story_points) =
+        validate_and_normalize_agile_fields(
+            pool,
+            task_payload.project_id,
+            task_type.clone(),
+            task_payload.sprint_id,
+            task_payload.epic_id,
+            task_payload.parent_task_id,
+            task_payload.story_points,
+        )
+        .await?;
+    task_payload.sprint_id = sprint_id;
+    task_payload.task_type = Some(task_type);
+    task_payload.epic_id = epic_id;
+    task_payload.parent_task_id = parent_task_id;
+    task_payload.story_points = story_points;
 
-    if let Some(image_ids) = &payload.task.image_ids {
+    let task = Task::create(pool, &task_payload, task_id).await?;
+
+    if let Some(image_ids) = &task_payload.image_ids {
         TaskImage::associate_many_dedup(pool, task.id, image_ids).await?;
     }
 
@@ -182,7 +271,7 @@ pub async fn create_task_and_start(
                 "task_id": task.id.to_string(),
                 "project_id": task.project_id,
                 "has_description": task.description.is_some(),
-                "has_images": payload.task.image_ids.is_some(),
+                "has_images": task_payload.image_ids.is_some(),
             }),
         )
         .await;
@@ -215,8 +304,7 @@ pub async fn create_task_and_start(
     )
     .await?;
 
-    let workspace_repos: Vec<CreateWorkspaceRepo> = payload
-        .repos
+    let workspace_repos: Vec<CreateWorkspaceRepo> = repos
         .iter()
         .map(|r| CreateWorkspaceRepo {
             repo_id: r.repo_id,
@@ -227,7 +315,7 @@ pub async fn create_task_and_start(
 
     let is_attempt_running = deployment
         .container()
-        .start_workspace(&workspace, payload.executor_profile_id.clone())
+        .start_workspace(&workspace, executor_profile_id.clone())
         .await
         .inspect_err(|err| tracing::error!("Failed to start task attempt: {}", err))
         .is_ok();
@@ -236,8 +324,8 @@ pub async fn create_task_and_start(
             "task_attempt_started",
             serde_json::json!({
                 "task_id": task.id.to_string(),
-                "executor": &payload.executor_profile_id.executor,
-                "variant": &payload.executor_profile_id.variant,
+                "executor": &executor_profile_id.executor,
+                "variant": &executor_profile_id.variant,
                 "workspace_id": workspace.id.to_string(),
             }),
         )
@@ -252,8 +340,7 @@ pub async fn create_task_and_start(
         task,
         has_in_progress_attempt: is_attempt_running,
         last_attempt_failed: false,
-        executor: payload.executor_profile_id.executor.to_string(),
-        environment_promotions: None,
+        executor: executor_profile_id.executor.to_string(),
     })))
 }
 
@@ -275,9 +362,27 @@ pub async fn update_task(
         None => existing_task.description,      // Field omitted = keep existing
     };
     let status = payload.status.unwrap_or(existing_task.status);
+    let sprint_id = payload.sprint_id.unwrap_or(existing_task.sprint_id);
+    let task_type = payload
+        .task_type
+        .unwrap_or_else(|| existing_task.task_type.clone());
+    let epic_id = payload.epic_id.unwrap_or(existing_task.epic_id);
+    let parent_task_id = payload.parent_task_id.unwrap_or(existing_task.parent_task_id);
+    let story_points = payload.story_points.unwrap_or(existing_task.story_points);
     let parent_workspace_id = payload
         .parent_workspace_id
-        .or(existing_task.parent_workspace_id);
+        .unwrap_or(existing_task.parent_workspace_id);
+
+    let (sprint_id, epic_id, parent_task_id, story_points) = validate_and_normalize_agile_fields(
+        &deployment.db().pool,
+        existing_task.project_id,
+        task_type.clone(),
+        sprint_id,
+        epic_id,
+        parent_task_id,
+        story_points,
+    )
+    .await?;
 
     // If moving into Staging/Prod, optionally run workflow promotion first.
     if old_status != status {
@@ -308,10 +413,17 @@ pub async fn update_task(
         &deployment.db().pool,
         existing_task.id,
         existing_task.project_id,
-        title,
-        description,
-        status,
-        parent_workspace_id,
+        UpdateTaskData {
+            title,
+            description,
+            status,
+            sprint_id,
+            task_type,
+            epic_id,
+            parent_task_id,
+            story_points,
+            parent_workspace_id,
+        },
     )
     .await?;
 
@@ -331,414 +443,138 @@ pub async fn update_task(
     Ok(ResponseJson(ApiResponse::success(task)))
 }
 
-async fn promote_task_to_environment(
-    deployment: &DeploymentImpl,
-    task_id: Uuid,
-    title: &str,
-    description: Option<&str>,
-    current_status: db::models::task::TaskStatus,
-    environment: WorkflowEnvironment,
-    workflow: services::services::config::WorkflowAutomationConfig,
-) -> Result<(), ApiError> {
-    // Guardrails: only promote from a clean, idle workspace.
-    if deployment
-        .container()
-        .has_running_processes(task_id)
-        .await?
+async fn validate_and_normalize_agile_fields(
+    pool: &sqlx::SqlitePool,
+    project_id: Uuid,
+    task_type: TaskType,
+    sprint_id: Option<Uuid>,
+    epic_id: Option<Uuid>,
+    parent_task_id: Option<Uuid>,
+    story_points: Option<i32>,
+) -> Result<(Option<Uuid>, Option<Uuid>, Option<Uuid>, Option<i32>), ApiError> {
+    if let Some(points) = story_points
+        && points < 0
     {
-        return Err(ApiError::Conflict(
-            "Task has running execution processes; stop them before promoting.".to_string(),
-        ));
-    }
-
-    let pool = &deployment.db().pool;
-    let workspaces = Workspace::fetch_all(pool, Some(task_id)).await?;
-    let workspace = workspaces.into_iter().next().ok_or_else(|| {
-        ApiError::Conflict("No attempt exists for this task; create an attempt first.".to_string())
-    })?;
-
-    let container_ref = deployment
-        .container()
-        .ensure_container_exists(&workspace)
-        .await?;
-    if !deployment.container().is_container_clean(&workspace).await? {
-        return Err(ApiError::Conflict(
-            "Attempt has uncommitted changes; commit or stash before promoting.".to_string(),
-        ));
-    }
-
-    let target_branch = match environment {
-        WorkflowEnvironment::Staging => workflow.staging_branch.clone(),
-        WorkflowEnvironment::Prod => workflow.prod_branch.clone(),
-    };
-
-    let repos = WorkspaceRepo::find_repos_with_target_branch_for_workspace(pool, workspace.id)
-        .await?
-        .into_iter()
-        .map(|r| r.repo)
-        .collect::<Vec<_>>();
-
-    if repos.is_empty() {
-        return Err(ApiError::Conflict(
-            "Attempt has no repositories attached; cannot promote.".to_string(),
-        ));
-    }
-
-    let task_uuid_str = task_id.to_string();
-    let short_id = task_uuid_str
-        .split('-')
-        .next()
-        .unwrap_or(&task_uuid_str)
-        .to_string();
-
-    let mut commit_message = format!(
-        "{title} (promote to {environment:?}) (vibe-kanban {short_id})"
-    );
-    if let Some(desc) = description.filter(|d| !d.trim().is_empty()) {
-        commit_message.push_str("\n\n");
-        commit_message.push_str(desc);
-    }
-
-    let workspace_path = PathBuf::from(container_ref);
-    let mut merged_commit: Option<String> = None;
-
-    let result: Result<(), ApiError> = async {
-        for repo in &repos {
-            // Ensure we have a local `target_branch` ref to update.
-            deployment
-                .git()
-                .sync_local_branch_with_default_remote(&repo.path, &target_branch)?;
-
-            let worktree_path = workspace_path.join(&repo.name);
-
-            let sha = deployment.git().merge_changes(
-                &repo.path,
-                &worktree_path,
-                &workspace.branch,
-                &target_branch,
-                &commit_message,
-            )?;
-
-            // Push the target branch to trigger CI/CD (works for GitHub and GitLab remotes).
-            if workflow.auto_push {
-                deployment.git().push_to_github(&repo.path, &target_branch, false)?;
-            }
-
-            if repos.len() == 1 {
-                merged_commit = Some(sha);
-            }
-        }
-        Ok(())
-    }
-    .await;
-
-    let promotion_id = Uuid::new_v4();
-    match result {
-        Ok(()) => {
-            let success_message = if workflow.auto_push {
-                format!("Merged and pushed to '{target_branch}'")
-            } else {
-                format!("Merged to '{target_branch}' (not pushed)")
-            };
-            EnvironmentPromotion::create(
-                pool,
-                promotion_id,
-                task_id,
-                Some(workspace.id),
-                environment,
-                PromotionStatus::Succeeded,
-                &target_branch,
-                merged_commit.as_deref(),
-                Some(&success_message),
-            )
-            .await?;
-            Ok(())
-        }
-        Err(err) => {
-            let err_message = err.to_string();
-            EnvironmentPromotion::create(
-                pool,
-                promotion_id,
-                task_id,
-                Some(workspace.id),
-                environment,
-                PromotionStatus::Failed,
-                &target_branch,
-                None,
-                Some(&err_message),
-            )
-            .await?;
-            // Trigger a task update event so clients can pick up the new promotion record.
-            Task::update_status(pool, task_id, current_status).await?;
-            Err(err)
-        }
-    }
-#[derive(Debug, Serialize, Deserialize, TS)]
-pub struct BacklogGroomerGenerateRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub executor_profile_id: Option<ExecutorProfileId>,
-}
-
-#[derive(Debug, Serialize, Deserialize, TS)]
-pub struct BacklogGroomerApplyRequest {
-    pub draft: BacklogGroomingDraft,
-}
-
-#[derive(Debug, Serialize, Deserialize, TS)]
-pub struct BacklogGroomerDraftResponse {
-    pub draft: BacklogGroomingDraft,
-}
-
-fn is_minimal_story(task: &Task) -> bool {
-    let title = task.title.trim();
-    let desc_len = task
-        .description
-        .as_ref()
-        .map(|d| d.trim().chars().count())
-        .unwrap_or(0);
-
-    let looks_like_story = {
-        let lower = title.to_lowercase();
-        lower.starts_with("story:")
-            || lower.starts_with("user story:")
-            || lower.starts_with("[story]")
-            || lower.starts_with("as a ")
-            || lower.starts_with("as an ")
-    };
-
-    looks_like_story && desc_len < 60
-}
-
-fn render_grooming_markdown(draft: &BacklogGroomingDraft) -> String {
-    let ac = draft
-        .acceptance_criteria
-        .iter()
-        .map(|s| format!("- {s}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let subtasks = draft
-        .subtasks
-        .iter()
-        .map(|s| format!("- [ ] {s}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    [
-        "<!-- BACKLOG_GROOMER_START -->",
-        "## Story Points",
-        "",
-        &draft.story_points.to_string(),
-        "",
-        "## Acceptance Criteria",
-        "",
-        &ac,
-        "",
-        "## Subtasks",
-        "",
-        &subtasks,
-        "<!-- BACKLOG_GROOMER_END -->",
-        "",
-    ]
-    .join("\n")
-}
-
-fn upsert_backlog_section(existing: Option<String>, section: &str) -> Option<String> {
-    let Some(mut existing) = existing.filter(|s| !s.trim().is_empty()) else {
-        return Some(section.to_string());
-    };
-
-    let start = "<!-- BACKLOG_GROOMER_START -->";
-    let end = "<!-- BACKLOG_GROOMER_END -->";
-
-    if let (Some(s_idx), Some(e_idx)) = (existing.find(start), existing.find(end)) {
-        let end_idx = e_idx + end.len();
-        existing.replace_range(s_idx..end_idx, section.trim_end());
-        return Some(existing);
-    }
-
-    if !existing.ends_with('\n') {
-        existing.push('\n');
-    }
-    existing.push('\n');
-    existing.push_str(section);
-    Some(existing)
-}
-
-pub async fn get_backlog_grooming_draft(
-    Extension(task): Extension<Task>,
-    State(deployment): State<DeploymentImpl>,
-) -> Result<ResponseJson<ApiResponse<Option<BacklogGroomerDraftResponse>>>, ApiError> {
-    let scratch = Scratch::find_by_id(
-        &deployment.db().pool,
-        task.id,
-        &ScratchType::BacklogGroomingDraft,
-    )
-    .await?;
-
-    let Some(scratch) = scratch else {
-        return Ok(ResponseJson(ApiResponse::success(None)));
-    };
-
-    let ScratchPayload::BacklogGroomingDraft(draft) = scratch.payload else {
-        return Ok(ResponseJson(ApiResponse::success(None)));
-    };
-
-    Ok(ResponseJson(ApiResponse::success(Some(
-        BacklogGroomerDraftResponse { draft },
-    ))))
-}
-
-pub async fn generate_backlog_grooming(
-    Extension(task): Extension<Task>,
-    State(deployment): State<DeploymentImpl>,
-    Json(payload): Json<BacklogGroomerGenerateRequest>,
-) -> Result<ResponseJson<ApiResponse<BacklogGroomerDraftResponse>>, ApiError> {
-    if !is_minimal_story(&task) {
         return Err(ApiError::BadRequest(
-            "Backlog grooming is only supported for story-like tasks with minimal description"
-                .to_string(),
+            "story_points must be a non-negative integer".to_string(),
         ));
     }
 
-    let configs = executors::profile::ExecutorConfigs::get_cached();
-    let executor_profile_id = match payload.executor_profile_id {
-        Some(id) => id,
-        None => match configs.get_recommended_executor_profile().await {
-            Ok(id) if matches!(id.executor, executors::executors::BaseCodingAgent::Codex) => {
-                ExecutorProfileId::with_variant(
-                    executors::executors::BaseCodingAgent::Codex,
-                    "BACKLOG_GROOMER".to_string(),
-                )
-            }
-            _ => ExecutorProfileId::with_variant(
-                executors::executors::BaseCodingAgent::Codex,
-                "BACKLOG_GROOMER".to_string(),
-            ),
-        },
-    };
+    if matches!(task_type, TaskType::Epic) {
+        if sprint_id.is_some() {
+            return Err(ApiError::BadRequest(
+                "Epic tasks cannot be assigned to a sprint".to_string(),
+            ));
+        }
+        if epic_id.is_some() || parent_task_id.is_some() {
+            return Err(ApiError::BadRequest(
+                "Epic tasks cannot have epic_id/parent_task_id set".to_string(),
+            ));
+        }
+        if story_points.is_some() {
+            return Err(ApiError::BadRequest(
+                "Epic tasks cannot have story_points set".to_string(),
+            ));
+        }
+        return Ok((None, None, None, None));
+    }
 
-    let coding_agent = configs.get_coding_agent_or_default(&executor_profile_id);
-    let executors::executors::CodingAgent::Codex(mut codex) = coding_agent else {
+    if matches!(task_type, TaskType::Feature) && story_points.is_some() {
         return Err(ApiError::BadRequest(
-            "Backlog grooming currently supports only the CODEX executor".to_string(),
+            "Feature tasks cannot have story_points set".to_string(),
         ));
-    };
+    }
 
-    // Ensure the backlog groomer variant is safe (no tool use / no approvals).
-    codex.include_apply_patch_tool = Some(false);
-    codex.sandbox = Some(executors::executors::codex::SandboxMode::ReadOnly);
-    codex.ask_for_approval = Some(executors::executors::codex::AskForApproval::Never);
+    if let Some(sprint_id) = sprint_id {
+        let sprint = Sprint::find_by_id(pool, sprint_id)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("Sprint not found".to_string()))?;
 
-    let groomer = BacklogGroomer::default();
-    let env = executors::env::ExecutionEnv::default();
-    let story_text = task.to_prompt();
+        if sprint.project_id != project_id {
+            return Err(ApiError::BadRequest(
+                "Sprint does not belong to the task's project".to_string(),
+            ));
+        }
+    }
 
-    let draft = groomer
-        .generate_with_codex(&story_text, codex, &env)
-        .await
-        .map_err(|e| match e {
-            BacklogGroomerError::AuthRequired => ApiError::BadRequest(
-                "Codex authentication required (settings → connect Codex)".to_string(),
-            ),
-            BacklogGroomerError::Timeout => {
-                ApiError::Conflict("Backlog grooming timed out".to_string())
+    let mut normalized_epic_id = epic_id;
+    let normalized_parent_task_id = parent_task_id;
+
+    if matches!(task_type, TaskType::Feature | TaskType::Story) && normalized_parent_task_id.is_none()
+    {
+        return Err(ApiError::BadRequest(
+            "Feature and Story tasks must have parent_task_id set".to_string(),
+        ));
+    }
+
+    if let Some(parent_id) = normalized_parent_task_id {
+        let parent = Task::find_by_id(pool, parent_id)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("parent_task_id not found".to_string()))?;
+
+        if parent.project_id != project_id {
+            return Err(ApiError::BadRequest(
+                "parent_task_id does not belong to the task's project".to_string(),
+            ));
+        }
+
+        match task_type {
+            TaskType::Feature => {
+                if parent.task_type != TaskType::Epic {
+                    return Err(ApiError::BadRequest(
+                        "Feature parent_task_id must reference an Epic".to_string(),
+                    ));
+                }
             }
-            _ => ApiError::BadRequest(format!("Backlog grooming failed: {e}")),
-        })?;
+            TaskType::Story => {
+                if parent.task_type != TaskType::Feature {
+                    return Err(ApiError::BadRequest(
+                        "Story parent_task_id must reference a Feature".to_string(),
+                    ));
+                }
+            }
+            TaskType::Task => {
+                if !matches!(parent.task_type, TaskType::Story | TaskType::Feature) {
+                    return Err(ApiError::BadRequest(
+                        "Task parent_task_id must reference a Story or Feature".to_string(),
+                    ));
+                }
+            }
+            TaskType::Epic => {}
+        }
 
-    // Store as scratch draft keyed by task id
-    let scratch = UpdateScratch {
-        payload: ScratchPayload::BacklogGroomingDraft(draft.clone()),
-    };
-    Scratch::update(
-        &deployment.db().pool,
-        task.id,
-        &ScratchType::BacklogGroomingDraft,
-        &scratch,
-    )
-    .await?;
-
-    Ok(ResponseJson(ApiResponse::success(BacklogGroomerDraftResponse {
-        draft,
-    })))
-}
-
-pub async fn apply_backlog_grooming(
-    Extension(existing_task): Extension<Task>,
-    State(deployment): State<DeploymentImpl>,
-    Json(payload): Json<BacklogGroomerApplyRequest>,
-) -> Result<ResponseJson<ApiResponse<Task>>, ApiError> {
-    ensure_shared_task_auth(&existing_task, &deployment).await?;
-
-    let draft = payload.draft.sanitize();
-    draft
-        .validate_strict()
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-
-    let section = render_grooming_markdown(&draft);
-    let description = upsert_backlog_section(existing_task.description.clone(), &section);
-
-    let task = Task::update(
-        &deployment.db().pool,
-        existing_task.id,
-        existing_task.project_id,
-        existing_task.title.clone(),
-        description,
-        existing_task.status,
-        existing_task.parent_workspace_id,
-    )
-    .await?;
-
-    // If task has been shared, broadcast update
-    if task.shared_task_id.is_some() {
-        let Ok(publisher) = deployment.share_publisher() else {
-            return Err(ShareError::MissingConfig("share publisher unavailable").into());
+        let parent_implied_epic_id = match parent.task_type {
+            TaskType::Epic => Some(parent.id),
+            _ => parent.epic_id,
         };
-        publisher.update_shared_task(&task).await?;
-    }
 
-    Ok(ResponseJson(ApiResponse::success(task)))
-}
-
-#[cfg(test)]
-mod backlog_grooming_tests {
-    use super::*;
-    use uuid::Uuid;
-
-    fn task(title: &str, description: Option<&str>) -> Task {
-        Task {
-            id: Uuid::new_v4(),
-            project_id: Uuid::new_v4(),
-            title: title.to_string(),
-            description: description.map(|s| s.to_string()),
-            status: db::models::task::TaskStatus::Todo,
-            parent_workspace_id: None,
-            shared_task_id: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+        if normalized_epic_id.is_none() {
+            normalized_epic_id = parent_implied_epic_id;
+        } else if parent_implied_epic_id.is_some() && normalized_epic_id != parent_implied_epic_id {
+            return Err(ApiError::BadRequest(
+                "epic_id must match the parent task's epic".to_string(),
+            ));
         }
     }
 
-    #[test]
-    fn minimal_story_detection_is_conservative() {
-        assert!(is_minimal_story(&task("Story: As a user, I can log in", None)));
-        assert!(!is_minimal_story(&task("Fix flaky test", None)));
-        assert!(!is_minimal_story(&task(
-            "Story: As a user, I can log in",
-            Some("Lots of context here that makes it no longer minimal. This should exceed the minimal threshold.")
-        )));
+    if let Some(epic_id) = normalized_epic_id {
+        let epic = Task::find_by_id(pool, epic_id)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("epic_id not found".to_string()))?;
+
+        if epic.project_id != project_id {
+            return Err(ApiError::BadRequest(
+                "epic_id does not belong to the task's project".to_string(),
+            ));
+        }
+        if epic.task_type != TaskType::Epic {
+            return Err(ApiError::BadRequest(
+                "epic_id must reference a task with type 'epic'".to_string(),
+            ));
+        }
     }
 
-    #[test]
-    fn upsert_replaces_existing_section() {
-        let existing = Some(
-            "Intro\n\n<!-- BACKLOG_GROOMER_START -->\nold\n<!-- BACKLOG_GROOMER_END -->\n\nOutro\n"
-                .to_string(),
-        );
-        let next = upsert_backlog_section(existing, "<!-- BACKLOG_GROOMER_START -->\nnew\n<!-- BACKLOG_GROOMER_END -->");
-        assert!(next.unwrap().contains("\nnew\n"));
-    }
+    Ok((sprint_id, normalized_epic_id, normalized_parent_task_id, story_points))
 }
 
 async fn ensure_shared_task_auth(
@@ -924,10 +760,173 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
 
     let inner = Router::new()
         .route("/", get(get_tasks).post(create_task))
+        .route("/backlog", get(get_backlog))
         .route("/stream/ws", get(stream_tasks_ws))
         .route("/create-and-start", post(create_task_and_start))
         .nest("/{task_id}", task_id_router);
 
     // mount under /projects/:project_id/tasks
     Router::new().nest("/tasks", inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use db::models::{
+        project::{CreateProject, Project},
+        sprint::{CreateSprint, Sprint},
+        task::{CreateTask, Task, TaskStatus, TaskType},
+    };
+    use sqlx::SqlitePool;
+    use uuid::Uuid;
+
+    use super::validate_and_normalize_agile_fields;
+
+    async fn setup_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn create_project(pool: &SqlitePool) -> Project {
+        let project_id = Uuid::new_v4();
+        Project::create(
+            pool,
+            &CreateProject {
+                name: "Test".to_string(),
+                repositories: vec![],
+            },
+            project_id,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn create_sprint(pool: &SqlitePool, project_id: Uuid) -> Sprint {
+        Sprint::create(
+            pool,
+            &CreateSprint {
+                project_id,
+                name: "Sprint 1".to_string(),
+                goal: None,
+                start_date: None,
+                end_date: None,
+                status: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn create_task(pool: &SqlitePool, project_id: Uuid, task_type: TaskType) -> Task {
+        Task::create(
+            pool,
+            &CreateTask {
+                project_id,
+                title: format!("{task_type}"),
+                description: None,
+                status: Some(TaskStatus::Todo),
+                sprint_id: None,
+                task_type: Some(task_type),
+                epic_id: None,
+                parent_task_id: None,
+                story_points: None,
+                parent_workspace_id: None,
+                image_ids: None,
+                shared_task_id: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn validates_epic_cannot_be_in_sprint() {
+        let pool = setup_pool().await;
+        let project = create_project(&pool).await;
+        let sprint = create_sprint(&pool, project.id).await;
+
+        let err = validate_and_normalize_agile_fields(
+            &pool,
+            project.id,
+            TaskType::Epic,
+            Some(sprint.id),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("Epic tasks cannot be assigned to a sprint"));
+    }
+
+    #[tokio::test]
+    async fn validates_feature_requires_epic_parent_and_derives_epic_id() {
+        let pool = setup_pool().await;
+        let project = create_project(&pool).await;
+        let epic = create_task(&pool, project.id, TaskType::Epic).await;
+
+        let (sprint_id, epic_id, parent_task_id, story_points) = validate_and_normalize_agile_fields(
+            &pool,
+            project.id,
+            TaskType::Feature,
+            None,
+            None,
+            Some(epic.id),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sprint_id, None);
+        assert_eq!(epic_id, Some(epic.id));
+        assert_eq!(parent_task_id, Some(epic.id));
+        assert_eq!(story_points, None);
+    }
+
+    #[tokio::test]
+    async fn validates_story_requires_feature_parent_and_derives_epic_id() {
+        let pool = setup_pool().await;
+        let project = create_project(&pool).await;
+        let epic = create_task(&pool, project.id, TaskType::Epic).await;
+
+        let feature = Task::create(
+            &pool,
+            &CreateTask {
+                project_id: project.id,
+                title: "Feature".to_string(),
+                description: None,
+                status: Some(TaskStatus::Todo),
+                sprint_id: None,
+                task_type: Some(TaskType::Feature),
+                epic_id: Some(epic.id),
+                parent_task_id: Some(epic.id),
+                story_points: None,
+                parent_workspace_id: None,
+                image_ids: None,
+                shared_task_id: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        let (_, epic_id, parent_task_id, story_points) = validate_and_normalize_agile_fields(
+            &pool,
+            project.id,
+            TaskType::Story,
+            None,
+            None,
+            Some(feature.id),
+            Some(3),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(epic_id, Some(epic.id));
+        assert_eq!(parent_task_id, Some(feature.id));
+        assert_eq!(story_points, Some(3));
+    }
 }

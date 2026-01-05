@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                  id as \"id!: Uuid\",\n                  project_id as \"project_id!: Uuid\",\n                  title,\n                  description,\n                  status as \"status!: TaskStatus\",\n                  sprint_id as \"sprint_id: Uuid\",\n                  task_type as \"task_type!: TaskType\",\n                  epic_id as \"epic_id: Uuid\",\n                  parent_task_id as \"parent_task_id: Uuid\",\n                  story_points as \"story_points: i32\",\n                  parent_workspace_id as \"parent_workspace_id: Uuid\",\n                  shared_task_id as \"shared_task_id: Uuid\",\n                  created_at as \"created_at!: DateTime<Utc>\",\n                  updated_at as \"updated_at!: DateTime<Utc>\"\n               FROM tasks\n               WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: Uuid",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "project_id!: Uuid",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "title",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "status!: TaskStatus",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "sprint_id: Uuid",
+        "ordinal": 5,
+        "type_info": "Blob"
+      },
+      {
+        "name": "task_type!: TaskType",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "epic_id: Uuid",
+        "ordinal": 7,
+        "type_info": "Blob"
+      },
+      {
+        "name": "parent_task_id: Uuid",
+        "ordinal": 8,
+        "type_info": "Blob"
+      },
+      {
+        "name": "story_points: i32",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "parent_workspace_id: Uuid",
+        "ordinal": 10,
+        "type_info": "Blob"
+      },
+      {
+        "name": "shared_task_id: Uuid",
+        "ordinal": 11,
+        "type_info": "Blob"
+      },
+      {
+        "name": "created_at!: DateTime<Utc>",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: DateTime<Utc>",
+        "ordinal": 13,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "29f430020b55885dc25c7e9ffce8e4726bd305ad489cacffcab472e31713cefc"
+}

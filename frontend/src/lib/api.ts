@@ -92,11 +92,12 @@ import {
   AbortConflictsRequest,
   Session,
   Workspace,
-  AnalyticsBucket,
-  BurndownResponse,
-  CfdResponse,
-  CycleTimeResponse,
-  DevExResponse,
+  Sprint,
+  CreateSprint,
+  UpdateSprint,
+  SprintPlanningTaskIds,
+  SprintPlanningUpdateResponse,
+  BacklogQuery,
 } from 'shared/types';
 import type { WorkspaceWithSession } from '@/types/attempt';
 import { createWorkspaceWithSession } from '@/types/attempt';
@@ -507,6 +508,77 @@ export const tasksApi = {
       body: JSON.stringify(data),
     });
     return handleApiResponse<Task | null>(response);
+  },
+
+  backlog: async (
+    projectId: string,
+    params: Partial<Omit<BacklogQuery, 'project_id'>> = {}
+  ): Promise<TaskWithAttemptStatus[]> => {
+    const query = new URLSearchParams({
+      project_id: projectId,
+      ...(params.include_done ? { include_done: 'true' } : {}),
+      ...(params.include_cancelled ? { include_cancelled: 'true' } : {}),
+      ...(params.include_in_sprint ? { include_in_sprint: 'true' } : {}),
+    });
+
+    const response = await makeRequest(`/api/tasks/backlog?${query.toString()}`);
+    return handleApiResponse<TaskWithAttemptStatus[]>(response);
+  },
+};
+
+// Sprint APIs
+export const sprintsApi = {
+  list: async (projectId: string): Promise<Sprint[]> => {
+    const query = new URLSearchParams({ project_id: projectId });
+    const response = await makeRequest(`/api/sprints?${query.toString()}`);
+    return handleApiResponse<Sprint[]>(response);
+  },
+
+  create: async (data: CreateSprint): Promise<Sprint> => {
+    const response = await makeRequest(`/api/sprints`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<Sprint>(response);
+  },
+
+  update: async (sprintId: string, data: UpdateSprint): Promise<Sprint> => {
+    const response = await makeRequest(`/api/sprints/${sprintId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<Sprint>(response);
+  },
+
+  delete: async (sprintId: string): Promise<void> => {
+    const response = await makeRequest(`/api/sprints/${sprintId}`, {
+      method: 'DELETE',
+    });
+    return handleApiResponse<void>(response);
+  },
+
+  assign: async (
+    sprintId: string,
+    taskIds: string[]
+  ): Promise<SprintPlanningUpdateResponse> => {
+    const payload: SprintPlanningTaskIds = { task_ids: taskIds };
+    const response = await makeRequest(`/api/sprints/${sprintId}/assign`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return handleApiResponse<SprintPlanningUpdateResponse>(response);
+  },
+
+  unassign: async (
+    sprintId: string,
+    taskIds: string[]
+  ): Promise<SprintPlanningUpdateResponse> => {
+    const payload: SprintPlanningTaskIds = { task_ids: taskIds };
+    const response = await makeRequest(`/api/sprints/${sprintId}/unassign`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return handleApiResponse<SprintPlanningUpdateResponse>(response);
   },
 };
 

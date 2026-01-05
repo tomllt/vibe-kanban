@@ -24,6 +24,7 @@ pub mod repo;
 pub mod scratch;
 pub mod sessions;
 pub mod shared_tasks;
+pub mod sprints;
 pub mod tags;
 pub mod task_attempts;
 pub mod tasks;
@@ -38,6 +39,7 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .merge(containers::router(&deployment))
         .merge(projects::router(&deployment))
         .merge(tasks::router(&deployment))
+        .merge(sprints::router(&deployment))
         .merge(shared_tasks::router())
         .merge(task_attempts::router(&deployment))
         .merge(execution_processes::router(&deployment))

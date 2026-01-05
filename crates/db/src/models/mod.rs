@@ -11,6 +11,7 @@ pub mod project_repo;
 pub mod repo;
 pub mod scratch;
 pub mod session;
+pub mod sprint;
 pub mod tag;
 pub mod task;
 pub mod task_status_event;

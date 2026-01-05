@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { KanbanCard } from '@/components/ui/shadcn-io/kanban';
 import { Link, Loader2, XCircle } from 'lucide-react';
-import type { TaskWithAttemptStatus } from 'shared/types';
+import type { TaskType, TaskWithAttemptStatus } from 'shared/types';
 import { ActionsDropdown } from '@/components/ui/actions-dropdown';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { useNavigateWithSearch } from '@/hooks';
 import { paths } from '@/lib/paths';
 import { attemptsApi } from '@/lib/api';
@@ -14,6 +15,19 @@ import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/hooks';
 
 type Task = TaskWithAttemptStatus;
+
+function formatTaskType(taskType: TaskType): string {
+  switch (taskType) {
+    case 'epic':
+      return 'Epic';
+    case 'feature':
+      return 'Feature';
+    case 'story':
+      return 'Story';
+    default:
+      return 'Task';
+  }
+}
 
 interface TaskCardProps {
   task: Task;
@@ -137,26 +151,16 @@ export function TaskCard({
           }
           right={
             <>
-              {stagingPromotion && (
-                <Badge
-                  className={`px-1.5 py-0 ${promotionBadgeClass(
-                    stagingPromotion.status
-                  )}`}
-                  title={promotionTitle('Staging', stagingPromotion)}
-                >
-                  S
+              {task.task_type !== 'task' ? (
+                <Badge variant="secondary" className="px-2 py-0.5">
+                  {formatTaskType(task.task_type)}
                 </Badge>
-              )}
-              {prodPromotion && (
-                <Badge
-                  className={`px-1.5 py-0 ${promotionBadgeClass(
-                    prodPromotion.status
-                  )}`}
-                  title={promotionTitle('Prod', prodPromotion)}
-                >
-                  P
+              ) : null}
+              {task.story_points != null ? (
+                <Badge variant="outline" className="px-2 py-0.5">
+                  {task.story_points} pts
                 </Badge>
-              )}
+              ) : null}
               {task.has_in_progress_attempt && (
                 <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
               )}
