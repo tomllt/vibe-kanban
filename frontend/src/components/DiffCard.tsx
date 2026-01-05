@@ -7,6 +7,7 @@ import { getHighLightLanguageFromPath } from '@/utils/extToLanguage';
 import { getActualTheme } from '@/utils/theme';
 import { stripLineEnding } from '@/utils/string';
 import { Button } from '@/components/ui/button';
+import { GitHubCommentCard } from '@/components/ui/github-comment-card';
 import {
   ChevronRight,
   ChevronUp,
@@ -35,12 +36,14 @@ import {
   useWrapTextDiff,
 } from '@/stores/useDiffViewStore';
 import { useProject } from '@/contexts/ProjectContext';
+import type { UnifiedPrComment } from 'shared/types';
 
 type Props = {
   diff: Diff;
   expanded: boolean;
   onToggle: () => void;
   selectedAttempt: Workspace | null;
+  prComments?: UnifiedPrComment[];
 };
 
 function labelAndIcon(diff: Diff) {
@@ -79,6 +82,7 @@ export default function DiffCard({
   expanded,
   onToggle,
   selectedAttempt,
+  prComments,
 }: Props) {
   const { config } = useUserSystem();
   const theme = getActualTheme(config?.theme);
@@ -153,25 +157,66 @@ export default function DiffCard({
     [comments, filePath]
   );
 
+  type ReviewPrComment = Extract<UnifiedPrComment, { comment_type: 'review' }>;
+
+  const prReviewCommentsForFile = useMemo(() => {
+    const candidates = new Set<string>();
+    if (newName) candidates.add(newName);
+    if (oldName) candidates.add(oldName);
+
+    return (prComments ?? []).filter(
+      (c): c is ReviewPrComment =>
+        c.comment_type === 'review' &&
+        candidates.has(c.path) &&
+        c.line != null
+    );
+  }, [oldName, newName, prComments]);
+
+  type LineCommentData =
+    | { kind: 'local'; comment: ReviewComment }
+    | { kind: 'github'; comment: ReviewPrComment };
+
   // Transform comments to git-diff-view extendData format
   const extendData = useMemo(() => {
-    const oldFileData: Record<string, { data: ReviewComment }> = {};
-    const newFileData: Record<string, { data: ReviewComment }> = {};
+    const oldFileData: Record<string, { data: LineCommentData[] }> = {};
+    const newFileData: Record<string, { data: LineCommentData[] }> = {};
 
     commentsForFile.forEach((comment) => {
       const lineKey = String(comment.lineNumber);
       if (comment.side === SplitSide.old) {
-        oldFileData[lineKey] = { data: comment };
+        const existing = oldFileData[lineKey]?.data ?? [];
+        oldFileData[lineKey] = {
+          data: [...existing, { kind: 'local', comment }],
+        };
       } else {
-        newFileData[lineKey] = { data: comment };
+        const existing = newFileData[lineKey]?.data ?? [];
+        newFileData[lineKey] = {
+          data: [...existing, { kind: 'local', comment }],
+        };
       }
+    });
+
+    prReviewCommentsForFile.forEach((comment) => {
+      const line = comment.line != null ? Number(comment.line) : null;
+      if (!line) return;
+      const lineKey = String(line);
+
+      const side = (comment.side ?? 'RIGHT').toUpperCase();
+      const target = side === 'LEFT' ? oldFileData : newFileData;
+      const existing = target[lineKey]?.data ?? [];
+      target[lineKey] = {
+        data: [
+          ...existing,
+          { kind: 'github', comment },
+        ],
+      };
     });
 
     return {
       oldFile: oldFileData,
       newFile: newFileData,
     };
-  }, [commentsForFile]);
+  }, [commentsForFile, prReviewCommentsForFile]);
 
   const handleAddWidgetClick = (lineNumber: number, side: SplitSide) => {
     const widgetKey = `${filePath}-${side}-${lineNumber}`;
@@ -206,9 +251,37 @@ export default function DiffCard({
     );
   };
 
-  const renderExtendLine = (lineData: { data: ReviewComment }) => {
+  const renderExtendLine = (lineData: { data: LineCommentData[] }) => {
     return (
-      <ReviewCommentRenderer comment={lineData.data} projectId={projectId} />
+      <div className="flex flex-col gap-2">
+        {lineData.data.map((item) => {
+          if (item.kind === 'local') {
+            return (
+              <ReviewCommentRenderer
+                key={`local:${item.comment.id}`}
+                comment={item.comment}
+                projectId={projectId}
+              />
+            );
+          }
+
+          const c = item.comment;
+          return (
+            <GitHubCommentCard
+              key={`github:${c.id.toString()}`}
+              author={c.author}
+              body={c.body}
+              createdAt={c.created_at}
+              url={c.url}
+              commentType="review"
+              path={c.path}
+              line={c.line != null ? Number(c.line) : null}
+              diffHunk={c.diff_hunk}
+              variant="full"
+            />
+          );
+        })}
+      </div>
     );
   };
 
@@ -235,10 +308,10 @@ export default function DiffCard({
       <span className="ml-2" style={{ color: 'hsl(var(--console-error))' }}>
         -{del}
       </span>
-      {commentsForFile.length > 0 && (
+      {commentsForFile.length + prReviewCommentsForFile.length > 0 && (
         <span className="ml-3 inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-primary/10 text-primary rounded">
           <MessageSquare className="h-3 w-3" />
-          {commentsForFile.length}
+          {commentsForFile.length + prReviewCommentsForFile.length}
         </span>
       )}
     </p>

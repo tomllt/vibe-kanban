@@ -97,6 +97,15 @@ impl PrMonitorService {
     async fn check_pr_status(&self, pr_merge: &PrMerge) -> Result<(), PrMonitorError> {
         // GitHubService now uses gh CLI, no token needed
         let github_service = GitHubService::new()?;
+        // Skip non-GitHub providers (e.g., GitLab MRs stored in the same table).
+        if pr_merge.pr_info.url.contains("/-/merge_requests/") {
+            debug!(
+                "Skipping non-GitHub merge URL in PR monitor: {}",
+                pr_merge.pr_info.url
+            );
+            return Ok(());
+        }
+
         let repo_info = GitHubRepoInfo::from_remote_url(&pr_merge.pr_info.url)?;
 
         let pr_status = github_service

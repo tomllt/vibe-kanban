@@ -22,6 +22,7 @@ import type {
   TaskWithAttemptStatus,
   Workspace,
 } from 'shared/types';
+import { attemptsApi } from '@/lib/api';
 import { ChangeTargetBranchDialog } from '@/components/dialogs/tasks/ChangeTargetBranchDialog';
 import RepoSelector from '@/components/tasks/RepoSelector';
 import { RebaseDialog } from '@/components/dialogs/tasks/RebaseDialog';
@@ -30,6 +31,8 @@ import { useTranslation } from 'react-i18next';
 import { useAttemptRepo } from '@/hooks/useAttemptRepo';
 import { useGitOperations } from '@/hooks/useGitOperations';
 import { useRepoBranches } from '@/hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import { useGitOperationsError } from '@/contexts/GitOperationsContext';
 import { useRepoMerges } from '@/hooks/useRepoMerges';
 
 interface GitOperationsProps {
@@ -52,6 +55,8 @@ function GitOperations({
   layout = 'horizontal',
 }: GitOperationsProps) {
   const { t } = useTranslation('tasks');
+  const queryClient = useQueryClient();
+  const { setError } = useGitOperationsError();
 
   const { repos, selectedRepoId, setSelectedRepoId } = useAttemptRepo(
     selectedAttempt.id
@@ -72,6 +77,7 @@ function GitOperations({
   const [merging, setMerging] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [rebasing, setRebasing] = useState(false);
+  const [attachingPr, setAttachingPr] = useState(false);
   const [mergeSuccess, setMergeSuccess] = useState(false);
   const [pushSuccess, setPushSuccess] = useState(false);
 
@@ -177,8 +183,9 @@ function GitOperations({
           ? t('git.states.pushing')
           : t('git.states.push');
     }
+    if (attachingPr) return 'Attaching…';
     return t('git.states.createPr');
-  }, [mergeInfo.hasOpenPR, pushSuccess, pushing, t]);
+  }, [mergeInfo.hasOpenPR, pushSuccess, pushing, attachingPr, t]);
 
   const handleMergeClick = async () => {
     // Directly perform merge without checking branch status
@@ -262,12 +269,54 @@ function GitOperations({
       return;
     }
 
-    CreatePRDialog.show({
-      attempt: selectedAttempt,
-      task,
-      repoId: getSelectedRepoId(),
-      targetBranch: getSelectedRepoStatus()?.target_branch_name,
-    });
+    const repoId = getSelectedRepoId();
+    if (!repoId) return;
+
+    setError(null);
+    setAttachingPr(true);
+    try {
+      const result = await attemptsApi.attachPR(selectedAttempt.id, {
+        repo_id: repoId,
+      });
+
+      if (result.success) {
+        if (result.data.pr_attached) {
+          if (result.data.pr_url) {
+            window.open(result.data.pr_url, '_blank', 'noopener,noreferrer');
+          }
+          queryClient.invalidateQueries({
+            queryKey: ['branchStatus', selectedAttempt.id],
+          });
+          return;
+        }
+
+        if (result.data.provider === 'gitlab') {
+          setError(
+            'No merge request found for this branch. Create one in GitLab, then click Attach again.'
+          );
+          return;
+        }
+
+        CreatePRDialog.show({
+          attempt: selectedAttempt,
+          task,
+          repoId,
+          targetBranch: getSelectedRepoStatus()?.target_branch_name,
+        });
+        return;
+      }
+
+      if (result.error?.type === 'gitlab_token_missing') {
+        setError(
+          'GitLab token is not configured. Set `GITLAB_TOKEN` (and optionally `GITLAB_BASE_URL`) and retry.'
+        );
+        return;
+      }
+
+      setError(result.message || 'Failed to attach PR/MR');
+    } finally {
+      setAttachingPr(false);
+    }
   };
 
   const isVertical = layout === 'vertical';

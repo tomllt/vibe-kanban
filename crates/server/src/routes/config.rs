@@ -89,8 +89,10 @@ async fn get_user_system_info(
     let config = deployment.config().read().await;
     let login_status = deployment.get_login_status().await;
 
+    let redacted_config = redact_secrets(config.clone());
+
     let user_system_info = UserSystemInfo {
-        config: config.clone(),
+        config: redacted_config,
         analytics_user_id: deployment.user_id().to_string(),
         login_status,
         profiles: ExecutorConfigs::get_cached(),
@@ -108,6 +110,13 @@ async fn get_user_system_info(
     };
 
     ResponseJson(ApiResponse::success(user_system_info))
+}
+
+fn redact_secrets(mut config: Config) -> Config {
+    config.github.pat = None;
+    config.github.oauth_token = None;
+    config.gitlab.token = None;
+    config
 }
 
 async fn update_config(
@@ -138,16 +147,28 @@ async fn update_config(
     // Get old config state before updating
     let old_config = deployment.config().read().await.clone();
 
-    match save_config_to_file(&new_config, &config_path).await {
+    // Preserve secrets if frontend sent redacted values.
+    let mut merged_config = new_config.clone();
+    if merged_config.github.pat.is_none() {
+        merged_config.github.pat = old_config.github.pat.clone();
+    }
+    if merged_config.github.oauth_token.is_none() {
+        merged_config.github.oauth_token = old_config.github.oauth_token.clone();
+    }
+    if merged_config.gitlab.token.is_none() {
+        merged_config.gitlab.token = old_config.gitlab.token.clone();
+    }
+
+    match save_config_to_file(&merged_config, &config_path).await {
         Ok(_) => {
             let mut config = deployment.config().write().await;
-            *config = new_config.clone();
+            *config = merged_config.clone();
             drop(config);
 
             // Track config events when fields transition from false → true and run side effects
-            handle_config_events(&deployment, &old_config, &new_config).await;
+            handle_config_events(&deployment, &old_config, &merged_config).await;
 
-            ResponseJson(ApiResponse::success(new_config))
+            ResponseJson(ApiResponse::success(redact_secrets(merged_config)))
         }
         Err(e) => ResponseJson(ApiResponse::error(&format!("Failed to save config: {}", e))),
     }

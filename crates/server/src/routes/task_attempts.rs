@@ -13,7 +13,7 @@ use std::{
 use axum::{
     Extension, Json, Router,
     extract::{
-        Query, State,
+        Path as AxumPath, Query, State,
         ws::{WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
@@ -45,11 +45,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use services::services::{
     container::ContainerService,
-    git::{ConflictOp, GitBranchKind, GitCliError, GitServiceError},
+    git::{ConflictOp, DiffTarget, GitCliError, GitServiceError, GitBranchKind},
     github::GitHubService,
 };
 use sqlx::Error as SqlxError;
 use ts_rs::TS;
+use utils::diff::Diff;
 use utils::response::ApiResponse;
 use uuid::Uuid;
 
@@ -1902,6 +1903,48 @@ pub async fn get_task_attempt_repos(
     Ok(ResponseJson(ApiResponse::success(repos)))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RepoDiffQuery {
+    /// Base revision to compare against (branch, tag, or commit SHA)
+    pub base_ref: Option<String>,
+    /// Head revision (branch, tag, or commit SHA)
+    pub head_ref: Option<String>,
+}
+
+pub async fn get_task_attempt_repo_diff(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    AxumPath(repo_id): AxumPath<Uuid>,
+    Query(query): Query<RepoDiffQuery>,
+) -> Result<ResponseJson<ApiResponse<Vec<Diff>>>, ApiError> {
+    let pool = &deployment.db().pool;
+
+    let workspace_repo = WorkspaceRepo::find_by_workspace_and_repo_id(pool, workspace.id, repo_id)
+        .await?
+        .ok_or(RepoError::NotFound)?;
+
+    let repo = Repo::find_by_id(pool, workspace_repo.repo_id)
+        .await?
+        .ok_or(RepoError::NotFound)?;
+
+    let base_ref = query.base_ref.unwrap_or_else(|| workspace_repo.target_branch.clone());
+    let head_ref = query.head_ref.unwrap_or_else(|| workspace.branch.clone());
+
+    let diffs = deployment
+        .git()
+        .get_diffs(
+            DiffTarget::RevRange {
+                repo_path: &repo.path,
+                base_ref: &base_ref,
+                head_ref: &head_ref,
+            },
+            None,
+        )
+        .map_err(ApiError::GitService)?;
+
+    Ok(ResponseJson(ApiResponse::success(diffs)))
+}
+
 pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
     let task_attempt_id_router = Router::new()
         .route("/", get(get_task_attempt))
@@ -1921,12 +1964,14 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/pr", post(pr::create_github_pr))
         .route("/pr/attach", post(pr::attach_existing_pr))
         .route("/pr/comments", get(pr::get_pr_comments))
+        .route("/pr/review-comments", post(pr::submit_pr_review_comments))
         .route("/open-editor", post(open_task_attempt_in_editor))
         .route("/children", get(get_task_attempt_children))
         .route("/stop", post(stop_task_attempt_execution))
         .route("/change-target-branch", post(change_target_branch))
         .route("/rename-branch", post(rename_branch))
         .route("/repos", get(get_task_attempt_repos))
+        .route("/repos/{repo_id}/diff", get(get_task_attempt_repo_diff))
         .layer(from_fn_with_state(
             deployment.clone(),
             load_workspace_middleware,

@@ -5,7 +5,6 @@ import { Loader } from '@/components/ui/loader';
 import { Button } from '@/components/ui/button';
 import DiffViewSwitch from '@/components/DiffViewSwitch';
 import DiffCard from '@/components/DiffCard';
-import { useDiffSummary } from '@/hooks/useDiffSummary';
 import { NewCardHeader } from '@/components/ui/new-card';
 import { ChevronsUp, ChevronsDown } from 'lucide-react';
 import {
@@ -14,16 +13,24 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import type { Diff, DiffChangeKind } from 'shared/types';
+import type { Diff, DiffChangeKind, UnifiedPrComment } from 'shared/types';
 import type { Workspace } from 'shared/types';
 import GitOperations, {
   type GitOperationsInputs,
 } from '@/components/tasks/Toolbar/GitOperations.tsx';
+import { useAttemptRepo } from '@/hooks/useAttemptRepo';
+import { useRepoDiff } from '@/hooks/useRepoDiff';
+import { usePrComments } from '@/hooks/usePrComments';
+import { useReview } from '@/contexts/ReviewProvider';
+import { SplitSide } from '@git-diff-view/react';
+import { attemptsApi } from '@/lib/api';
 
 interface DiffsPanelProps {
   selectedAttempt: Workspace | null;
   gitOps?: GitOperationsInputs;
 }
+
+type DiffSource = 'worktree' | 'branch';
 
 type DiffCollapseDefaults = Record<DiffChangeKind, boolean>;
 
@@ -37,6 +44,8 @@ const DEFAULT_DIFF_COLLAPSE_DEFAULTS: DiffCollapseDefaults = {
 };
 
 const DEFAULT_COLLAPSE_MAX_LINES = 200;
+const EMPTY_DIFFS: Diff[] = [];
+const EMPTY_PR_COMMENTS: UnifiedPrComment[] = [];
 
 const exceedsMaxLineCount = (d: Diff, maxLines: number): boolean => {
   if (d.additions != null || d.deletions != null)
@@ -50,28 +59,102 @@ const getDiffId = ({ diff, index }: { diff: Diff; index: number }) =>
 
 export function DiffsPanel({ selectedAttempt, gitOps }: DiffsPanelProps) {
   const { t } = useTranslation('tasks');
-  const [loadingState, setLoadingState] = useState<
+  const [worktreeLoadingState, setWorktreeLoadingState] = useState<
     'loading' | 'loaded' | 'timed-out'
   >('loading');
+  const [diffSource, setDiffSource] = useState<DiffSource>('worktree');
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
   const [processedIds, setProcessedIds] = useState<Set<string>>(new Set());
-  const { diffs, error } = useDiffStream(selectedAttempt?.id ?? null, true);
-  const { fileCount, added, deleted } = useDiffSummary(
-    selectedAttempt?.id ?? null
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  const attemptId = selectedAttempt?.id ?? null;
+  const { selectedRepoId } = useAttemptRepo(selectedAttempt?.id ?? undefined);
+  const { comments: localComments, clearComments } = useReview();
+
+  const worktreeStreamEnabled = diffSource === 'worktree';
+  const { diffs: worktreeDiffs, error: worktreeError } = useDiffStream(
+    attemptId,
+    worktreeStreamEnabled
   );
+
+  const repoDiff = useRepoDiff(selectedAttempt?.id, selectedRepoId ?? undefined, {
+    enabled: diffSource === 'branch',
+  });
+
+  const selectedRepoStatus = useMemo(() => {
+    if (!gitOps?.branchStatus || !selectedRepoId) return null;
+    return gitOps.branchStatus.find((r) => r.repo_id === selectedRepoId) ?? null;
+  }, [gitOps?.branchStatus, selectedRepoId]);
+
+  const hasAttachedPr = useMemo(() => {
+    return (
+      (selectedRepoStatus?.merges ?? []).some((m) => m.type === 'pr') ?? false
+    );
+  }, [selectedRepoStatus?.merges]);
+
+  const prCommentsQuery = usePrComments(
+    selectedAttempt?.id,
+    selectedRepoId ?? undefined,
+    {
+      enabled: diffSource === 'branch' && hasAttachedPr,
+    }
+  );
+
+  const prComments = prCommentsQuery.data?.comments ?? EMPTY_PR_COMMENTS;
+
+  const diffs = useMemo(() => {
+    if (diffSource === 'branch') return repoDiff.data ?? EMPTY_DIFFS;
+    return worktreeDiffs;
+  }, [diffSource, repoDiff.data, worktreeDiffs]);
+
+  const error = useMemo(() => {
+    if (diffSource === 'branch') {
+      return (repoDiff.error as Error | null)?.message ?? null;
+    }
+    return worktreeError;
+  }, [diffSource, repoDiff.error, worktreeError]);
+
+  const { fileCount, added, deleted } = useMemo(() => {
+    if (diffs.length === 0) return { fileCount: 0, added: 0, deleted: 0 };
+
+    return diffs.reduce(
+      (acc, d) => {
+        acc.added += d.additions ?? 0;
+        acc.deleted += d.deletions ?? 0;
+        return acc;
+      },
+      { fileCount: diffs.length, added: 0, deleted: 0 }
+    );
+  }, [diffs]);
 
   // If no diffs arrive within 3 seconds, stop showing the spinner
   useEffect(() => {
-    if (loadingState !== 'loading') return;
-    const timer = setTimeout(() => setLoadingState('timed-out'), 3000);
+    if (!worktreeStreamEnabled) return;
+    if (worktreeLoadingState !== 'loading') return;
+    const timer = setTimeout(
+      () => setWorktreeLoadingState('timed-out'),
+      3000
+    );
     return () => clearTimeout(timer);
-  }, [loadingState]);
+  }, [worktreeLoadingState, worktreeStreamEnabled]);
 
-  if (diffs.length > 0 && loadingState === 'loading') {
-    setLoadingState('loaded');
-  }
+  useEffect(() => {
+    if (!worktreeStreamEnabled) return;
+    if (worktreeDiffs.length > 0 && worktreeLoadingState === 'loading') {
+      setWorktreeLoadingState('loaded');
+    }
+  }, [worktreeDiffs.length, worktreeLoadingState, worktreeStreamEnabled]);
 
-  if (diffs.length > 0) {
+  useEffect(() => {
+    setCollapsedIds(new Set());
+    setProcessedIds(new Set());
+    if (worktreeStreamEnabled) setWorktreeLoadingState('loading');
+  }, [attemptId, selectedRepoId, diffSource, worktreeStreamEnabled]);
+
+  useEffect(() => {
+    if (diffs.length === 0) return;
+
     const newDiffs = diffs
       .map((d, index) => ({ diff: d, index }))
       .filter((d) => {
@@ -79,24 +162,66 @@ export function DiffsPanel({ selectedAttempt, gitOps }: DiffsPanelProps) {
         return !processedIds.has(id);
       });
 
-    if (newDiffs.length > 0) {
-      const newIds = newDiffs.map(getDiffId);
-      const toCollapse = newDiffs
-        .filter(
-          ({ diff }) =>
-            DEFAULT_DIFF_COLLAPSE_DEFAULTS[diff.change] ||
-            exceedsMaxLineCount(diff, DEFAULT_COLLAPSE_MAX_LINES)
-        )
-        .map(getDiffId);
+    if (newDiffs.length === 0) return;
 
-      setProcessedIds((prev) => new Set([...prev, ...newIds]));
-      if (toCollapse.length > 0) {
-        setCollapsedIds((prev) => new Set([...prev, ...toCollapse]));
-      }
+    const newIds = newDiffs.map(getDiffId);
+    const toCollapse = newDiffs
+      .filter(
+        ({ diff }) =>
+          DEFAULT_DIFF_COLLAPSE_DEFAULTS[diff.change] ||
+          exceedsMaxLineCount(diff, DEFAULT_COLLAPSE_MAX_LINES)
+      )
+      .map(getDiffId);
+
+    setProcessedIds((prev) => new Set([...prev, ...newIds]));
+    if (toCollapse.length > 0) {
+      setCollapsedIds((prev) => new Set([...prev, ...toCollapse]));
     }
-  }
+  }, [diffs, processedIds]);
 
-  const loading = loadingState === 'loading';
+  const loading =
+    diffSource === 'branch'
+      ? repoDiff.isLoading
+      : worktreeLoadingState === 'loading';
+
+  const canSyncToPr =
+    diffSource === 'branch' &&
+    !!selectedAttempt?.id &&
+    !!selectedRepoId &&
+    hasAttachedPr &&
+    localComments.length > 0;
+
+  const handleSyncToPr = useCallback(async () => {
+    if (!selectedAttempt?.id || !selectedRepoId) return;
+    if (localComments.length === 0) return;
+    setSyncError(null);
+    setSyncing(true);
+    try {
+      await attemptsApi.submitPrReviewComments(selectedAttempt.id, {
+        repo_id: selectedRepoId,
+        comments: localComments.map((c) => ({
+          path: c.filePath,
+          line: c.lineNumber,
+          side: c.side === SplitSide.old ? 'LEFT' : 'RIGHT',
+          body: c.text,
+        })),
+      });
+      clearComments();
+      await prCommentsQuery.refetch();
+    } catch (e) {
+      const msg =
+        e instanceof Error ? e.message : 'Failed to sync PR review comments';
+      setSyncError(msg);
+    } finally {
+      setSyncing(false);
+    }
+  }, [
+    clearComments,
+    localComments,
+    prCommentsQuery,
+    selectedAttempt?.id,
+    selectedRepoId,
+  ]);
 
   const ids = useMemo(() => {
     return diffs.map((d, i) => getDiffId({ diff: d, index: i }));
@@ -138,6 +263,13 @@ export function DiffsPanel({ selectedAttempt, gitOps }: DiffsPanelProps) {
       selectedAttempt={selectedAttempt}
       gitOps={gitOps}
       loading={loading}
+      diffSource={diffSource}
+      setDiffSource={setDiffSource}
+      prComments={prComments}
+      syncError={syncError}
+      canSyncToPr={canSyncToPr}
+      syncing={syncing}
+      onSyncToPr={handleSyncToPr}
       t={t}
     />
   );
@@ -155,6 +287,13 @@ interface DiffsPanelContentProps {
   selectedAttempt: Workspace | null;
   gitOps?: GitOperationsInputs;
   loading: boolean;
+  diffSource: DiffSource;
+  setDiffSource: (source: DiffSource) => void;
+  prComments: UnifiedPrComment[];
+  syncError: string | null;
+  canSyncToPr: boolean;
+  syncing: boolean;
+  onSyncToPr: () => void;
   t: (key: string, params?: Record<string, unknown>) => string;
 }
 
@@ -170,15 +309,65 @@ function DiffsPanelContent({
   selectedAttempt,
   gitOps,
   loading,
+  diffSource,
+  setDiffSource,
+  prComments,
+  syncError,
+  canSyncToPr,
+  syncing,
+  onSyncToPr,
   t,
 }: DiffsPanelContentProps) {
   return (
     <div className="h-full flex flex-col relative">
-      {diffs.length > 0 && (
+      {selectedAttempt && (
         <NewCardHeader
           className="sticky top-0 z-10"
           actions={
             <>
+              {gitOps && selectedAttempt && (
+                <>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant={
+                        diffSource === 'worktree' ? 'secondary' : 'outline'
+                      }
+                      onClick={() => setDiffSource('worktree')}
+                      aria-pressed={diffSource === 'worktree'}
+                    >
+                      Worktree
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={diffSource === 'branch' ? 'secondary' : 'outline'}
+                      onClick={() => setDiffSource('branch')}
+                      aria-pressed={diffSource === 'branch'}
+                    >
+                      Branch
+                    </Button>
+                  </div>
+                  <div className="h-4 w-px bg-border" />
+                </>
+              )}
+              {diffSource === 'branch' && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={onSyncToPr}
+                    disabled={!canSyncToPr || syncing}
+                    title={
+                      canSyncToPr
+                        ? 'Submit review comments to PR'
+                        : 'Add review comments to enable syncing'
+                    }
+                  >
+                    {syncing ? 'Syncing…' : 'Sync to PR'}
+                  </Button>
+                  <div className="h-4 w-px bg-border" />
+                </>
+              )}
               <DiffViewSwitch />
               <div className="h-4 w-px bg-border" />
               <TooltipProvider>
@@ -187,6 +376,7 @@ function DiffsPanelContent({
                     <Button
                       variant="icon"
                       onClick={handleCollapseAll}
+                      disabled={diffs.length === 0}
                       aria-pressed={allCollapsed}
                       aria-label={
                         allCollapsed
@@ -228,6 +418,11 @@ function DiffsPanelContent({
           <GitOperations selectedAttempt={selectedAttempt} {...gitOps} />
         </div>
       )}
+      {syncError && (
+        <div className="mx-3 mt-3 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-800">
+          {syncError}
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto px-3">
         {loading ? (
           <div className="flex items-center justify-center h-full">
@@ -247,6 +442,7 @@ function DiffsPanelContent({
                 expanded={!collapsedIds.has(id)}
                 onToggle={() => toggle(id)}
                 selectedAttempt={selectedAttempt}
+                prComments={prComments}
               />
             );
           })

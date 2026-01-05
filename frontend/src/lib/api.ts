@@ -74,6 +74,9 @@ import {
   ResolveConflictsError,
   ResolveConflictsRequest,
   CreatePrError,
+  AttachExistingPrRequest,
+  AttachPrResponse,
+  AttachPrError,
   Scratch,
   ScratchType,
   CreateScratch,
@@ -94,6 +97,7 @@ import {
   AbortConflictsRequest,
   Session,
   Workspace,
+  Diff,
   Sprint,
   CreateSprint,
   UpdateSprint,
@@ -850,6 +854,24 @@ export const attemptsApi = {
     return handleApiResponse<RepoWithTargetBranch[]>(response);
   },
 
+  getRepoDiff: async (
+    attemptId: string,
+    repoId: string,
+    params?: { base_ref?: string; head_ref?: string }
+  ): Promise<Diff[]> => {
+    const search = new URLSearchParams();
+    if (params?.base_ref) search.set('base_ref', params.base_ref);
+    if (params?.head_ref) search.set('head_ref', params.head_ref);
+    const query = search.toString();
+
+    const response = await makeRequest(
+      `/api/task-attempts/${attemptId}/repos/${encodeURIComponent(repoId)}/diff${
+        query ? `?${query}` : ''
+      }`
+    );
+    return handleApiResponse<Diff[]>(response);
+  },
+
   merge: async (
     attemptId: string,
     data: MergeTaskAttemptRequest
@@ -975,6 +997,17 @@ export const attemptsApi = {
     return handleApiResponseAsResult<string, CreatePrError>(response);
   },
 
+  attachPR: async (
+    attemptId: string,
+    data: AttachExistingPrRequest
+  ): Promise<Result<AttachPrResponse, AttachPrError>> => {
+    const response = await makeRequest(`/api/task-attempts/${attemptId}/pr/attach`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponseAsResult<AttachPrResponse, AttachPrError>(response);
+  },
+
   startDevServer: async (attemptId: string): Promise<void> => {
     const response = await makeRequest(
       `/api/task-attempts/${attemptId}/start-dev-server`,
@@ -1031,6 +1064,28 @@ export const attemptsApi = {
       `/api/task-attempts/${attemptId}/pr/comments?repo_id=${encodeURIComponent(repoId)}`
     );
     return handleApiResponse<PrCommentsResponse>(response);
+  },
+
+  submitPrReviewComments: async (
+    attemptId: string,
+    data: {
+      repo_id: string;
+      comments: Array<{
+        path: string;
+        line: number;
+        side?: 'LEFT' | 'RIGHT';
+        body: string;
+      }>;
+    }
+  ): Promise<void> => {
+    const response = await makeRequest(
+      `/api/task-attempts/${attemptId}/pr/review-comments`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<void>(response);
   },
 };
 
