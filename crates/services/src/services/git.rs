@@ -13,7 +13,7 @@ use utils::diff::{Diff, DiffChangeKind, FileDiffDetails, compute_line_change_cou
 mod cli;
 
 use cli::{ChangeType, StatusDiffEntry, StatusDiffOptions};
-pub use cli::{GitCli, GitCliError};
+pub use cli::{GitCli, GitCliError, StatusEntry, WorktreeStatus};
 
 use super::file_ranker::FileStat;
 use crate::services::github::GitHubRepoInfo;
@@ -1655,6 +1655,30 @@ impl GitService {
         git.get_conflicted_files(worktree_path).map_err(|e| {
             GitServiceError::InvalidRepository(format!("git diff for conflicts failed: {e}"))
         })
+    }
+
+    /// Return worktree status details via git CLI.
+    pub fn get_worktree_status(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<WorktreeStatus, GitServiceError> {
+        let git = GitCli::new();
+        git.get_worktree_status(worktree_path).map_err(|e| {
+            GitServiceError::InvalidRepository(format!("git status failed: {e}"))
+        })
+    }
+
+    /// Return a safe rollback ref for conflict resolution.
+    pub fn get_conflict_backup_ref(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<String, GitServiceError> {
+        let git = GitCli::new();
+        if let Ok(orig) = git.rev_parse(worktree_path, "ORIG_HEAD") {
+            return Ok(orig);
+        }
+        let head = self.get_head_info(worktree_path)?;
+        Ok(head.oid)
     }
 
     /// Abort an in-progress rebase in this worktree (no-op if none).

@@ -6,7 +6,7 @@ pub mod pr;
 pub mod util;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -42,6 +42,7 @@ use executors::{
 };
 use git2::BranchType;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use services::services::{
     container::ContainerService,
     git::{ConflictOp, GitBranchKind, GitCliError, GitServiceError},
@@ -67,6 +68,20 @@ pub struct RebaseTaskAttemptRequest {
 #[derive(Debug, Deserialize, Serialize, TS)]
 pub struct AbortConflictsRequest {
     pub repo_id: Uuid,
+}
+
+#[derive(Debug, Deserialize, Serialize, TS)]
+pub struct ResolveConflictsRequest {
+    pub repo_id: Uuid,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+pub enum ResolveConflictsError {
+    NoConflicts,
+    ProcessAlreadyRunning,
+    MissingExecutorProfile,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -1091,6 +1106,412 @@ pub async fn abort_conflicts_task_attempt(
     Ok(ResponseJson(ApiResponse::success(())))
 }
 
+#[derive(Debug)]
+struct ConflictPromptContext {
+    attempt_branch: String,
+    base_branch: Option<String>,
+    repo_name: String,
+    conflict_op: Option<ConflictOp>,
+    conflicted_files: Vec<String>,
+    status_lines: Vec<String>,
+    status_truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PackageManager {
+    Pnpm,
+    Yarn,
+    Npm,
+}
+
+impl PackageManager {
+    fn run_command(self, script: &str) -> String {
+        match self {
+            PackageManager::Pnpm => format!("pnpm run {script}"),
+            PackageManager::Yarn => format!("yarn {script}"),
+            PackageManager::Npm => format!("npm run {script}"),
+        }
+    }
+}
+
+fn detect_package_manager(worktree_path: &Path) -> PackageManager {
+    if worktree_path.join("pnpm-lock.yaml").exists()
+        || worktree_path.join("pnpm-workspace.yaml").exists()
+    {
+        return PackageManager::Pnpm;
+    }
+    if worktree_path.join("yarn.lock").exists() {
+        return PackageManager::Yarn;
+    }
+    PackageManager::Npm
+}
+
+fn read_package_scripts(worktree_path: &Path) -> Option<HashSet<String>> {
+    let package_json = worktree_path.join("package.json");
+    let contents = std::fs::read_to_string(package_json).ok()?;
+    let json: Value = serde_json::from_str(&contents).ok()?;
+    let scripts = json.get("scripts")?.as_object()?;
+    let mut keys = HashSet::new();
+    for (key, value) in scripts {
+        if let Some(script) = value.as_str()
+            && !script.trim().is_empty()
+        {
+            keys.insert(key.clone());
+        }
+    }
+    if keys.is_empty() {
+        None
+    } else {
+        Some(keys)
+    }
+}
+
+fn detect_test_commands(worktree_path: &Path) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(scripts) = read_package_scripts(worktree_path) {
+        let package_manager = detect_package_manager(worktree_path);
+        let script = if scripts.contains("test") {
+            Some("test")
+        } else if scripts.contains("check") {
+            Some("check")
+        } else {
+            None
+        };
+        if let Some(script) = script {
+            let cmd = package_manager.run_command(script);
+            if seen.insert(cmd.clone()) {
+                commands.push(cmd);
+            }
+        }
+    }
+
+    if worktree_path.join("Cargo.toml").exists() {
+        let cmd = "cargo test --workspace".to_string();
+        if seen.insert(cmd.clone()) {
+            commands.push(cmd);
+        }
+    }
+
+    commands
+}
+
+fn format_status_lines(status: &services::services::git::WorktreeStatus) -> (Vec<String>, bool) {
+    const MAX_STATUS_LINES: usize = 40;
+    let mut lines = Vec::new();
+    for entry in status.entries.iter().take(MAX_STATUS_LINES) {
+        let path = String::from_utf8_lossy(&entry.path);
+        let line = if let Some(orig) = &entry.orig_path {
+            let orig_path = String::from_utf8_lossy(orig);
+            format!("{}{} {} -> {}", entry.staged, entry.unstaged, orig_path, path)
+        } else {
+            format!("{}{} {}", entry.staged, entry.unstaged, path)
+        };
+        lines.push(line);
+    }
+    let truncated = status.entries.len() > MAX_STATUS_LINES;
+    (lines, truncated)
+}
+
+fn conflict_op_label(op: Option<ConflictOp>) -> &'static str {
+    match op {
+        Some(ConflictOp::Merge) => "Merge",
+        Some(ConflictOp::CherryPick) => "Cherry-pick",
+        Some(ConflictOp::Revert) => "Revert",
+        Some(ConflictOp::Rebase) | None => "Rebase",
+    }
+}
+
+fn conflict_continue_cmd(op: Option<ConflictOp>) -> &'static str {
+    match op {
+        Some(ConflictOp::Merge) => "git merge --continue",
+        Some(ConflictOp::CherryPick) => "git cherry-pick --continue",
+        Some(ConflictOp::Revert) => "git revert --continue",
+        Some(ConflictOp::Rebase) | None => "git rebase --continue",
+    }
+}
+
+fn build_conflict_prompt(ctx: ConflictPromptContext, test_commands: &[String]) -> String {
+    let op_label = conflict_op_label(ctx.conflict_op.clone());
+    let continue_cmd = conflict_continue_cmd(ctx.conflict_op.clone());
+
+    let mut prompt = String::new();
+    prompt.push_str(&format!(
+        "{op_label} conflicts detected in repository '{repo}'.\n\
+Attempt branch: {attempt}\n\
+Base branch: {base}\n\n",
+        repo = ctx.repo_name,
+        attempt = ctx.attempt_branch,
+        base = ctx
+            .base_branch
+            .clone()
+            .unwrap_or_else(|| "base branch".to_string())
+    ));
+
+    if !ctx.conflicted_files.is_empty() {
+        prompt.push_str("Conflicted files:\n");
+        for file in &ctx.conflicted_files {
+            prompt.push_str(&format!("- {file}\n"));
+        }
+        prompt.push('\n');
+    }
+
+    if !ctx.status_lines.is_empty() {
+        prompt.push_str("Current git status (porcelain):\n");
+        for line in &ctx.status_lines {
+            prompt.push_str(line);
+            prompt.push('\n');
+        }
+        if ctx.status_truncated {
+            prompt.push_str("...status truncated...\n");
+        }
+        prompt.push('\n');
+    }
+
+    if test_commands.is_empty() {
+        prompt.push_str(
+            "Automated tests: no default test command detected. The system will skip tests.\n\n",
+        );
+    } else {
+        prompt.push_str("Automated tests (run after you finish):\n");
+        for cmd in test_commands {
+            prompt.push_str(&format!("- {cmd}\n"));
+        }
+        prompt.push('\n');
+    }
+
+    prompt.push_str(
+        "Resolve each conflict carefully, keeping unrelated changes untouched. \
+Stage files as needed and continue the operation using the appropriate command:\n",
+    );
+    prompt.push_str(&format!("- {continue_cmd}\n\n"));
+    prompt.push_str("Use `GIT_EDITOR=true` if Git prompts for an editor.\n\n");
+    prompt.push_str(
+        "Guardrails:\n\
+- Do not run destructive commands like `git reset --hard` or abort operations.\n\
+- Keep changes scoped to the conflicted files unless absolutely required.\n\
+- If conflicts remain after your edits, stop and report.\n",
+    );
+
+    prompt
+}
+
+fn build_conflict_test_script(test_commands: &[String], backup_ref: &str) -> String {
+    let mut script = String::new();
+    script.push_str("set -uo pipefail\n");
+    script.push_str(&format!("backup_ref='{backup_ref}'\n\n"));
+    script.push_str(
+        "rollback() {\n\
+  echo \"Tests failed; rolling back to ${backup_ref}.\"\n\
+  if git rev-parse --verify REBASE_HEAD >/dev/null 2>&1; then\n\
+    git rebase --abort || true\n\
+  fi\n\
+  if git rev-parse --verify MERGE_HEAD >/dev/null 2>&1; then\n\
+    git merge --abort || true\n\
+  fi\n\
+  if git rev-parse --verify CHERRY_PICK_HEAD >/dev/null 2>&1; then\n\
+    git cherry-pick --abort || true\n\
+  fi\n\
+  if git rev-parse --verify REVERT_HEAD >/dev/null 2>&1; then\n\
+    git revert --abort || true\n\
+  fi\n\
+  git reset --hard \"${backup_ref}\"\n\
+}\n\n",
+    );
+
+    script.push_str(
+        "if git diff --name-only --diff-filter=U | grep -q .; then\n\
+  echo \"Conflicts still present after resolution.\"\n\
+  rollback\n\
+  exit 1\n\
+fi\n\n",
+    );
+
+    script.push_str(
+        "if git rev-parse --verify REBASE_HEAD >/dev/null 2>&1; then\n\
+  echo \"Rebase still in progress after resolution.\"\n\
+  rollback\n\
+  exit 1\n\
+fi\n\n\
+if git rev-parse --verify MERGE_HEAD >/dev/null 2>&1; then\n\
+  echo \"Merge still in progress after resolution.\"\n\
+  rollback\n\
+  exit 1\n\
+fi\n\n\
+if git rev-parse --verify CHERRY_PICK_HEAD >/dev/null 2>&1; then\n\
+  echo \"Cherry-pick still in progress after resolution.\"\n\
+  rollback\n\
+  exit 1\n\
+fi\n\n\
+if git rev-parse --verify REVERT_HEAD >/dev/null 2>&1; then\n\
+  echo \"Revert still in progress after resolution.\"\n\
+  rollback\n\
+  exit 1\n\
+fi\n\n",
+    );
+
+    if test_commands.is_empty() {
+        script.push_str("echo \"No test commands detected; skipping tests.\"\n");
+        return script;
+    }
+
+    for cmd in test_commands {
+        script.push_str(&format!("echo \"Running: {cmd}\"\n"));
+        script.push_str(&format!(
+            "if ! {cmd}; then\n  echo \"Command failed: {cmd}\"\n  rollback\n  exit 1\nfi\n\n"
+        ));
+    }
+
+    script.push_str("echo \"Conflict resolution tests passed.\"\n");
+    script
+}
+
+#[axum::debug_handler]
+pub async fn resolve_conflicts_task_attempt(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<ResolveConflictsRequest>,
+) -> Result<ResponseJson<ApiResponse<ExecutionProcess, ResolveConflictsError>>, ApiError> {
+    let pool = &deployment.db().pool;
+
+    if ExecutionProcess::has_running_non_dev_server_processes_for_workspace(pool, workspace.id)
+        .await?
+    {
+        return Ok(ResponseJson(ApiResponse::error_with_data(
+            ResolveConflictsError::ProcessAlreadyRunning,
+        )));
+    }
+
+    let workspace_repo =
+        WorkspaceRepo::find_by_workspace_and_repo_id(pool, workspace.id, payload.repo_id)
+            .await?
+            .ok_or(RepoError::NotFound)?;
+
+    let repo = Repo::find_by_id(pool, workspace_repo.repo_id)
+        .await?
+        .ok_or(RepoError::NotFound)?;
+
+    let container_ref = deployment
+        .container()
+        .ensure_container_exists(&workspace)
+        .await?;
+    let workspace_path = Path::new(&container_ref);
+    let worktree_path = workspace_path.join(&repo.name);
+
+    let conflicted_files = deployment
+        .git()
+        .get_conflicted_files(&worktree_path)
+        .unwrap_or_default();
+    if conflicted_files.is_empty() {
+        return Ok(ResponseJson(ApiResponse::error_with_data(
+            ResolveConflictsError::NoConflicts,
+        )));
+    }
+
+    let conflict_op = deployment
+        .git()
+        .detect_conflict_op(&worktree_path)
+        .unwrap_or(None);
+    let status = deployment.git().get_worktree_status(&worktree_path)?;
+    let (status_lines, status_truncated) = format_status_lines(&status);
+
+    let test_commands = detect_test_commands(&worktree_path);
+    let prompt = build_conflict_prompt(
+        ConflictPromptContext {
+            attempt_branch: workspace.branch.clone(),
+            base_branch: Some(workspace_repo.target_branch.clone()),
+            repo_name: repo.name.clone(),
+            conflict_op,
+            conflicted_files: conflicted_files.clone(),
+            status_lines,
+            status_truncated,
+        },
+        &test_commands,
+    );
+
+    let backup_ref = deployment.git().get_conflict_backup_ref(&worktree_path)?;
+    let script = build_conflict_test_script(&test_commands, &backup_ref);
+
+    let session = match Session::find_latest_by_workspace_id(pool, workspace.id).await? {
+        Some(s) => s,
+        None => {
+            Session::create(
+                pool,
+                &CreateSession {
+                    executor: Some("rebase-helper".to_string()),
+                },
+                Uuid::new_v4(),
+                workspace.id,
+            )
+            .await?
+        }
+    };
+
+    let executor_profile_id =
+        match ExecutionProcess::latest_executor_profile_for_session(pool, session.id).await {
+            Ok(profile) => profile,
+            Err(_) => {
+                return Ok(ResponseJson(ApiResponse::error_with_data(
+                    ResolveConflictsError::MissingExecutorProfile,
+                )));
+            }
+        };
+
+    let latest_agent_session_id =
+        ExecutionProcess::find_latest_coding_agent_turn_session_id(pool, session.id).await?;
+
+    let working_dir = workspace
+        .agent_working_dir
+        .as_ref()
+        .filter(|dir| !dir.is_empty() && dir.starts_with(&repo.name))
+        .cloned()
+        .or_else(|| Some(repo.name.clone()));
+
+    let action_type = if let Some(agent_session_id) = latest_agent_session_id {
+        ExecutorActionType::CodingAgentFollowUpRequest(
+            executors::actions::coding_agent_follow_up::CodingAgentFollowUpRequest {
+                prompt: prompt.clone(),
+                session_id: agent_session_id,
+                executor_profile_id: executor_profile_id.clone(),
+                working_dir: working_dir.clone(),
+            },
+        )
+    } else {
+        ExecutorActionType::CodingAgentInitialRequest(
+            executors::actions::coding_agent_initial::CodingAgentInitialRequest {
+                prompt: prompt.clone(),
+                executor_profile_id: executor_profile_id.clone(),
+                working_dir: working_dir.clone(),
+            },
+        )
+    };
+
+    let test_action = ExecutorAction::new(
+        ExecutorActionType::ScriptRequest(ScriptRequest {
+            script,
+            language: ScriptRequestLanguage::Bash,
+            context: ScriptContext::ConflictTests,
+            working_dir,
+        }),
+        None,
+    );
+
+    let action = ExecutorAction::new(action_type, Some(Box::new(test_action)));
+
+    let execution_process = deployment
+        .container()
+        .start_execution(
+            &workspace,
+            &session,
+            &action,
+            &ExecutionProcessRunReason::CodingAgent,
+        )
+        .await?;
+
+    Ok(ResponseJson(ApiResponse::success(execution_process)))
+}
+
 #[axum::debug_handler]
 pub async fn start_dev_server(
     Extension(workspace): Extension<Workspace>,
@@ -1496,6 +1917,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/push/force", post(force_push_task_attempt_branch))
         .route("/rebase", post(rebase_task_attempt))
         .route("/conflicts/abort", post(abort_conflicts_task_attempt))
+        .route("/conflicts/resolve", post(resolve_conflicts_task_attempt))
         .route("/pr", post(pr::create_github_pr))
         .route("/pr/attach", post(pr::attach_existing_pr))
         .route("/pr/comments", get(pr::get_pr_comments))
@@ -1516,4 +1938,68 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .nest("/{id}/images", images::router(deployment));
 
     Router::new().nest("/task-attempts", task_attempts_router)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn detect_test_commands_prefers_test_script() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"test":"vitest","check":"tsc"}}"#,
+        )
+        .expect("write package.json");
+        fs::write(dir.path().join("pnpm-lock.yaml"), "").expect("write lockfile");
+
+        let commands = detect_test_commands(dir.path());
+        assert_eq!(commands, vec!["pnpm run test".to_string()]);
+    }
+
+    #[test]
+    fn detect_test_commands_falls_back_to_check() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"check":"tsc -b"}}"#,
+        )
+        .expect("write package.json");
+        fs::write(dir.path().join("pnpm-lock.yaml"), "").expect("write lockfile");
+
+        let commands = detect_test_commands(dir.path());
+        assert_eq!(commands, vec!["pnpm run check".to_string()]);
+    }
+
+    #[test]
+    fn detect_test_commands_includes_cargo() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n")
+            .expect("write Cargo.toml");
+
+        let commands = detect_test_commands(dir.path());
+        assert_eq!(commands, vec!["cargo test --workspace".to_string()]);
+    }
+
+    #[test]
+    fn build_conflict_prompt_includes_context() {
+        let prompt = build_conflict_prompt(
+            ConflictPromptContext {
+                attempt_branch: "feature-branch".to_string(),
+                base_branch: Some("main".to_string()),
+                repo_name: "repo".to_string(),
+                conflict_op: Some(ConflictOp::Rebase),
+                conflicted_files: vec!["src/lib.rs".to_string()],
+                status_lines: vec!["UU src/lib.rs".to_string()],
+                status_truncated: false,
+            },
+            &vec!["pnpm run test".to_string()],
+        );
+
+        assert!(prompt.contains("Rebase conflicts"));
+        assert!(prompt.contains("src/lib.rs"));
+        assert!(prompt.contains("pnpm run test"));
+    }
 }
